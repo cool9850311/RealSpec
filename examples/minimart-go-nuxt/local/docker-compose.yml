@@ -1,0 +1,67 @@
+# Local development stack for minimart.
+#
+# This is NOT what the e2e suite runs. The suite builds the same two images and
+# starts a fresh postgres + backend + caddy per scenario through testcontainers
+# (frontend/tests/e2e/stack.ts), sharing only one frontend container. This file
+# exists so a human can bring the app up and click around, and so the images
+# below are the ones the suite reuses.
+#
+#   local/certs/generate.sh          (first time only; the e2e suite runs it too)
+#   docker compose -f local/docker-compose.yml up --build
+#   open https://127.0.0.1
+#
+# The certificate is generated rather than committed: a private key does not
+# belong in a repository, and mkcert names its CA after the account and machine
+# that created it. See local/certs/generate.sh.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: minimart
+      POSTGRES_PASSWORD: minimart_secret
+      POSTGRES_DB: minimart
+    # fsync off: this database is disposable in dev and recreated per scenario
+    # in tests. Durability buys nothing and costs startup time.
+    command: ["postgres", "-c", "fsync=off", "-c", "full_page_writes=off", "-c", "synchronous_commit=off"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U minimart -d minimart"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    environment:
+      PORT: "8080"
+      DB_DSN: "postgres://minimart:minimart_secret@postgres:5432/minimart?sslmode=disable"
+      JWT_SECRET: "minimart-local-secret"
+      SCHEMA_AUTO_MIGRATE: "true"
+      FRONTEND_ORIGIN: "https://127.0.0.1"
+      COOKIE_SECURE: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+    depends_on:
+      - backend
+      - frontend

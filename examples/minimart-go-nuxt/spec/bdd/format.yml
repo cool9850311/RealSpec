@@ -1,0 +1,836 @@
+# format.yml — BDD Step Pattern Registry (minimart)
+#
+# ONE registry, two surfaces. The steps whose `When` is an HTTP call
+# (spec/bdd/api/*.feature, run by godog) and the steps whose `When` is a real
+# browser action (spec/bdd/e2e/*.feature, run by playwright-bdd) are declared in
+# the same file, because they are the same language. Three steps —
+# run_migration, exec_postgresql and postgresql_query_returns — are shared
+# verbatim by both surfaces: an API Background and an e2e Background seed data
+# with byte-identical text.
+#
+# All step patterns are fully anchored (^ … $) and match the full step text
+# after the Gherkin keyword (Given / When / Then / And / But) is stripped.
+#
+# Cucumber step definitions are keyword-agnostic; the `keywords` field is
+# documentation-only and enforces readable convention, not runtime behaviour.
+#
+# Capture groups are listed in order of appearance in the pattern.
+#
+# ── The locator grammar ──────────────────────────────────────────────────────
+#
+# Every element reference in an e2e step is a single double-quoted token in one
+# of exactly three forms:
+#
+#     "<role>:<literal name>"     "button:Submit"      "heading:Products"
+#     "<role>:@<i18n.key>"        "button:@shop.redeem"
+#     "testid:<name>"             "testid:order-row"   "testid:order-row-{orderId}"
+#
+# <role> is a closed vocabulary drawn from WAI-ARIA 1.2; the name is matched by
+# the ACCNAME accessible-name computation. `@key` is resolved through the i18n
+# catalogue of the locale set by `locale is`, so the same feature passes in
+# zh_TW and en_US. `testid:` is the escape hatch for elements that no role and
+# name can identify (table rows, cells), and is the only form that admits a
+# {contextVar} segment.
+#
+# A `testid:` token matches an element whose data-testid is EXACTLY the token,
+# or whose data-testid begins with the token followed by a hyphen. That single
+# rule is what lets one family of rows be both counted and addressed:
+# rows rendered as data-testid="order-row-12", "order-row-13" are counted by
+# `list "testid:order-row" has 2 rows` and one of them is addressed by
+# `region "testid:order-row-{orderId}" contains:`. It is a prefix rule on a
+# hyphen boundary, not a substring match: "testid:order-row" does not match
+# "order-rows-total" and does not match "reorder-row-1".
+#
+# The regex fragment for a locator is repeated verbatim in every pattern that
+# takes one. That repetition is the point: it is what makes CSS selectors,
+# XPath and comma-separated fallback chains ungrammatical rather than merely
+# discouraged. A step written as `click "tbody tr"` matches no pattern in this
+# file and `realspec validate` rejects the file — the false-green test that
+# motivated this standard cannot be expressed.
+#
+# ── Carrying identity ────────────────────────────────────────────────────────
+#
+# On the API surface an authenticated request writes its own credential:
+#
+#     "headers": { "Cookie": "token={aliceToken}" }
+#
+# and the token is named one of exactly two ways. Either the feature logs in —
+# an ordinary `POST /api/v1/auth/login`, its 200 asserted, followed by
+# `save response cookie "token" as "aliceToken"` — or it names one of the four
+# pre-minted credentials declared in `context_variables` below, which is how a
+# feature reaches a credential the login endpoint cannot issue. There is no cookie jar and no
+# ambient session — nothing survives from one request to the next except the
+# named variables a step deliberately saved. It is more to type per request, and
+# that is the trade being made: identity is legible where it is used, one
+# mechanism answers "who is this request", and a scenario cannot drift into
+# testing a session it never states.
+#
+# There is no step that logs in, because there is nothing left for one to do
+# that the vocabulary does not already say. A login is a request; `http_request`
+# sends requests. Reading a cookie out of the answer is the only part nothing
+# else could express, and that part — and only that part — is a step.
+#
+# ── Concurrency ──────────────────────────────────────────────────────────────
+#
+# Two steps make a race expressible: `… is called concurrently:` fires an array
+# of the same envelopes http_request takes, all released at one instant, and
+# `exactly <n> responses are <status>` asserts the set they came back as. They
+# are API-only. A browser drives one page, so a race between callers is not
+# something the e2e surface can state, and a fake one would be worse than none.
+#
+# The concurrent step records a SET and clears the single response, so
+# `response status is`, `response body contains:` and `save response cookie`
+# after it fail saying so rather than reading a stale answer from an earlier
+# step. Those two vocabularies never mix.
+
+# ── The pre-minted credentials ───────────────────────────────────────────────
+#
+# The four tokens under `context_variables.provided` below are a closed set,
+# minted per scenario by the harness with the JWT_SECRET it already sets on the
+# container — so the service under test carries no test-only code. What each
+# one deviates in, and what that deviation tests, is stated at its entry.
+#
+# Deliberately absent: there is no `wait <n>s` step on either surface. A fixed
+# sleep is the single largest source of flake, and the browser is where the
+# temptation lives — Playwright already auto-waits. Where this domain needed to
+# wait it did not, because every one of its operations is synchronous; a project
+# with asynchronous side effects should add a CONDITION step ("wait up to <n>s
+# for <condition>") rather than a duration, and prove it with a scenario.
+#
+# Also absent, and for the same reason: no step is registered here that no
+# scenario in this project uses. A registered step is an implemented step, and
+# an implementation no scenario ever runs is unverified code wearing the badge
+# of a verified one. The harness asserts this — see the registry-parity test in
+# frontend/tests/e2e/harness/harness.spec.ts.
+#
+# Absent for a third reason: no step is registered here that the steps already
+# registered can assemble, and none that a more general step can replace. An
+# entry is earned by expressing something the others cannot, never by shortening
+# something they can. Four entries failed that test and were removed, every use
+# rewritten:
+#
+#   `fill form:` with a flat JSON docstring was precisely one `fill` per key.
+#
+#   `signed in as "(guest|admin)" with username "<name>"` was `visit "/login"`,
+#   two `fill` steps and a `click` — the real form login that login.feature
+#   already writes out. It also carried a `role` argument that read as a choice
+#   and was an assertion: across all eleven of its uses it was never anything
+#   but "guest", so the discriminating half of `(guest|admin)` was never once
+#   exercised, while inviting a reader to change it and expect to become an
+#   admin.
+#
+#   `save login token for "<username>" as "<varName>"` bundled two acts. The
+#   first was a login, which is a request, and `http_request` sends requests.
+#   The second was reading a cookie out of the answer, which nothing else could
+#   do — so the second became `save response cookie`, which reads any cookie of
+#   any response, and the first became the three lines a feature writes anyway.
+#   One entry left the registry and the vocabulary got strictly larger.
+#
+#   `save signed token as "<varName>":` existed so that a feature could name a
+#   credential the login endpoint cannot issue. Its four uses deviated on
+#   exactly one field each, so the four tokens — not the machine for making
+#   them — are what the features needed: they are now the pre-minted context
+#   variables in context_variables.provided, and the requests
+#   that carry them read like every other request in the file.
+#
+# What the first two conveniences cost was not the lines they saved. A second
+# way to establish the same premise is a second thing that has to stay true, and
+# the one the features leaned on was the one that never went through the login
+# page. What the last two cost was a docstring grammar — five keys, their
+# defaults, their interactions — carried by the whole registry so that four
+# scenarios could each set one of them.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONTEXT VARIABLES
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# `provided` names the variables every scenario starts with. Every other
+# {name} a step writes must be saved earlier in the same scenario by a step
+# that declares `produces`. `realspec validate` enforces both.
+
+context_variables:
+
+  provided:
+
+    tokenExpired: >
+      Alice's own token with `exp` 60 seconds past — tests that a valid
+      signature is not sufficient.
+    tokenWrongKey: >
+      Alice's unexpired token signed with a second key no container is given —
+      tests that the signature is verified at all.
+    tokenUnknownUser: >
+      Alice's claims but `sub` "4242", an id nothing seeds — tests that the
+      subject is looked up rather than believed.
+    tokenClaimsAdmin: >
+      Alice's token claiming `role` "admin" where her users row says "guest" —
+      tests that authority is read from the row on every request.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP DEFINITIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+steps:
+
+  # ── Shared: Infrastructure Setup (API + E2E) ────────────────────────────────
+
+  - id: run_migration
+    keywords: [Given]
+    pattern: "^run migration$"
+    docstring: ~
+    description: >
+      Applies every migration in backend/migrations to this scenario's database
+      (DDL only, no seed data) and leaves it at the latest version.
+      Must be the first step in every Background, on both surfaces.
+      Fails the scenario if any migration errors; the database is per-scenario,
+      so it never has to be idempotent against an existing schema.
+
+  - id: exec_postgresql
+    keywords: [Given, And]
+    pattern: "^in PostgreSQL:$"
+    docstring:
+      type: sql
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+    description: >
+      Executes the docstring as raw SQL DML against this scenario's database,
+      as a single statement batch, outside any explicit transaction.
+      Used for seeding and for mutating seeded state mid-scenario.
+      Any SQL error fails the scenario immediately with the driver's message.
+      Identical on both surfaces: an e2e Background seeds exactly the way an
+      API Background does.
+
+  # ── API: HTTP Request ───────────────────────────────────────────────────────
+
+  - id: http_request
+    keywords: [When]
+    pattern: "^(GET|POST|PUT|PATCH|DELETE) (/api/v1/[a-zA-Z0-9/{}:._?=&%-]+):$"
+    captures:
+      - name: method
+        pattern: "GET|POST|PUT|PATCH|DELETE"
+        description: HTTP method (uppercase).
+      - name: path
+        pattern: "/api/v1/[a-zA-Z0-9/{}:._-]+"
+        description: >
+          Absolute API path starting with /api/v1/. Every path used in a feature
+          must exist in spec/openapi/openapi.yaml (whose server base is
+          {host}/api/v1). Path parameters use {camelCase} notation and are
+          substituted from the scenario's context variables.
+    docstring:
+      type: json
+      schema:
+        headers:
+          required: false
+          key_pattern: "^[A-Z][A-Za-z0-9]*(?:-[A-Z][A-Za-z0-9]*)*$"
+          description: Optional request headers in HTTP canonical form.
+        body:
+          required: false
+          description: >
+            Optional request body. The runner sends no request body when the key
+            is absent, or when its value is {} or null — so a GET that needs
+            neither headers nor body may use an empty {} docstring.
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+    description: >
+      Sends one HTTP request to this scenario's backend and stores the response
+      for the following assertion steps. Headers and body are co-located in a
+      single JSON docstring with top-level keys "headers" and "body", both
+      optional; no other top-level key is allowed.
+      The client keeps NO COOKIE JAR: a Set-Cookie in a response is recorded on
+      that response and nothing more, and the next request sends exactly the
+      headers its own docstring writes. A request that carries identity says so
+      itself — "headers": {"Cookie": "token={someVar}"}, with the token named by
+      an earlier save_response_cookie or by one of the pre-minted credentials in
+      context_variables.provided — so there is one mechanism, and who a request
+      is made by is readable at the request instead of traced backwards through
+      the scenario.
+      Transport errors (connection refused, timeout) fail the scenario; any HTTP
+      status, including 5xx, is recorded rather than raised, so the status is
+      asserted explicitly by response_status.
+
+  - id: http_request_concurrent
+    keywords: [When]
+    pattern: "^(GET|POST|PUT|PATCH|DELETE) (/api/v1/[a-zA-Z0-9/{}:._?=&%-]+) is called concurrently:$"
+    captures:
+      - name: method
+        pattern: "GET|POST|PUT|PATCH|DELETE"
+        description: HTTP method (uppercase); the same for every caller.
+      - name: path
+        pattern: "/api/v1/[a-zA-Z0-9/{}:._-]+"
+        description: >
+          Absolute API path; the same for every caller, under http_request's
+          rules unchanged.
+    docstring:
+      type: json
+      schema:
+        "[]":
+          required: true
+          description: >
+            A JSON ARRAY of the envelopes http_request takes — "headers" and
+            "body", both optional, no other key. One element is one caller, so
+            the array's length is how many requests are fired and each caller's
+            credential is written at the point of use. At least two elements.
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+    description: >
+      Sends every request in the array AT ONE INSTANT and records the set of
+      answers. Each caller builds its request and parks; when all of them are
+      parked the gate opens and they proceed together, which is the closest a
+      race can be arranged from outside the service.
+      Every rule of http_request holds per element: no cookie jar, the headers
+      are the ones the element writes, {contextVar} tokens are substituted, and
+      any HTTP status is recorded rather than raised. A transport failure by any
+      caller fails the step, naming which one.
+      What the step cannot do for a scenario is warm the SERVICE. A service that
+      takes a database connection per in-flight request has none open on its
+      first burst, and a caller still opening one is a caller that is not in the
+      race — so a scenario whose race must be real fires a concurrent READ
+      first, in the same step, and says why.
+      What it records is a SET, and only response_set_status_count reads it.
+      It also CLEARS the single response, so response_status,
+      response_body_contains, response_body_does_not_contain,
+      response_header_contains, save_response_body_field and
+      save_response_cookie all fail after it with a message saying the last step
+      was concurrent and how many answers it got — rather than silently
+      asserting against a response some earlier step left behind, which is the
+      one way this step could make a scenario lie.
+
+  # ── API: Response Assertions ────────────────────────────────────────────────
+
+  - id: response_status
+    keywords: [Then, And]
+    pattern: "^response status is ([1-5][0-9]{2})$"
+    captures:
+      - name: statusCode
+        pattern: "[1-5][0-9]{2}"
+        description: Expected HTTP status code in range 100–599.
+    docstring: ~
+    description: >
+      Asserts the status code of the most recent HTTP response.
+      On mismatch the failure message includes the actual status and the
+      response body, because a wrong status is almost always explained by it.
+
+  - id: response_set_status_count
+    keywords: [Then, And]
+    pattern: "^exactly ([0-9]+) responses? (?:is|are) ([1-5][0-9]{2})$"
+    captures:
+      - name: count
+        pattern: "[0-9]+"
+        description: >
+          Exact number of responses in the set that must carry the status.
+          0 asserts none did.
+      - name: statusCode
+        pattern: "[1-5][0-9]{2}"
+        description: Expected HTTP status code in range 100–599.
+    docstring: ~
+    description: >
+      Asserts how many of the responses recorded by the last
+      http_request_concurrent step carried this status. The count is EXACT:
+      "one of the four callers got a 201" is the whole claim a race makes, and
+      an "at least" form would pass on the oversell it exists to catch.
+      Fails printing the distribution actually observed — every status, how many
+      responses carried it and one of their bodies — so a wrong expectation says
+      what really happened instead of only that it was wrong.
+      Fails if no concurrent step has run in this scenario.
+
+  - id: response_body_contains
+    keywords: [Then, And]
+    pattern: "^response body contains:$"
+    docstring:
+      type: json
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+      special_values:
+        - token: "\"<non-null>\""
+          description: >
+            Asserts the field is present in the response and its value is not
+            JSON null. Does not constrain the value type or content.
+        - token: "\"{[a-z][a-zA-Z0-9]+}\""
+          description: >
+            Context variable resolved at runtime from the scenario's state bag
+            (e.g. "{orderId}" is replaced with the id saved from a prior 201).
+    description: >
+      Performs a partial JSON match against the most recent response body: only
+      the keys present in the docstring are checked, and additional keys in the
+      actual response are ignored. Nested objects match recursively by the same
+      rule; arrays match element-wise and the lengths must be equal.
+      Fails naming the first path that is missing or unequal, and prints the
+      actual body. Fails if the response body is not valid JSON.
+
+  - id: response_body_does_not_contain
+    keywords: [Then, And]
+    pattern: "^response body does not contain \"([^\"]+)\"$"
+    captures:
+      - name: key
+        pattern: "[^\"]+"
+        description: >
+          A JSON key name (or any substring) that must be absent from the
+          response body. Used to prove that a field is not leaked — for example
+          that a login response carries neither password_hash nor the raw token.
+    docstring: ~
+    description: >
+      Asserts that the given text does not appear anywhere in the raw response
+      body, at any nesting level, whether as a key or inside a value.
+      Fails printing the surrounding fragment where the text was found.
+
+  - id: response_header_contains
+    keywords: [Then, And]
+    pattern: "^response header \"([^\"]+)\" contains \"([^\"]+)\"$"
+    captures:
+      - name: header
+        description: HTTP header name (e.g. "Set-Cookie", "Content-Type").
+      - name: substring
+        description: Expected substring of the header value.
+    docstring: ~
+    description: >
+      Asserts that a header of the most recent response contains the given
+      substring. The header name is looked up case-insensitively; the value is
+      matched as a case-sensitive substring. When the header occurs more than
+      once (Set-Cookie does), the assertion passes if ANY occurrence contains
+      the substring. Fails if the header is absent, listing the headers present.
+    example: |
+      Then response header "Set-Cookie" contains "token="
+
+  - id: save_response_body_field
+    keywords: [And, Then]
+    pattern: "^save response body field \"([a-zA-Z_][a-zA-Z0-9_]*)\" as \"([a-z][a-zA-Z0-9]+)\"$"
+    produces: varName
+    captures:
+      - name: field
+        description: Top-level JSON field name in the most recent response body.
+      - name: varName
+        description: >
+          Context variable name; usable afterwards as {varName} inside JSON and
+          SQL docstrings, and inside a testid locator segment.
+    docstring: ~
+    description: >
+      Reads the named top-level field from the most recent response body and
+      stores its value, rendered as a string, in the scenario's context bag.
+      Numbers are stored without quotes or exponent (1 → "1"), so the variable
+      can be interpolated into SQL as well as JSON.
+      Fails if the body is not a JSON object, if the field is absent, or if its
+      value is null.
+
+  - id: save_response_cookie
+    keywords: [And, Then]
+    pattern: "^save response cookie \"([a-zA-Z0-9_-]+)\" as \"([a-z][a-zA-Z0-9]+)\"$"
+    produces: varName
+    captures:
+      - name: name
+        pattern: "[a-zA-Z0-9_-]+"
+        description: >
+          Cookie name, as the response's Set-Cookie header spells it.
+      - name: varName
+        description: >
+          Context variable name; usable afterwards as {varName} inside JSON and
+          SQL docstrings, and inside a testid locator segment. A session token
+          is carried into a later request as
+          "headers": {"Cookie": "token={varName}"}.
+    docstring: ~
+    description: >
+      Reads the named cookie from the most recent response's Set-Cookie headers
+      and stores its value in the scenario's context bag.
+      The other half of save_response_body_field, and the same contract:
+      produce a value, give it a name, change nothing else. It is what a
+      scenario uses to carry a session, because a login is written out as the
+      ordinary request it is and this is the one part of the answer no other
+      step can reach — the body of a login response deliberately does not
+      contain the token.
+      Saving a token authenticates nothing. The client keeps no cookie jar, so a
+      later request is made as somebody only when its own docstring writes the
+      Cookie header itself.
+      Fails if no response has been recorded yet, if the response set no cookie
+      of that name — listing the Set-Cookie headers it did set — or if it set
+      that cookie to the empty string, which is how a session is CLEARED: saving
+      it would name a credential that authenticates nothing while every request
+      below reads as though it does.
+    example: |
+      When POST /api/v1/auth/login:
+        """json
+        { "body": { "username": "alice", "password": "secret123" } }
+        """
+      Then response status is 200
+      And save response cookie "token" as "aliceToken"
+
+  # ── Shared: Infrastructure Query Assertions (API + E2E) ─────────────────────
+
+  - id: postgresql_query_returns
+    keywords: [Then, And, Given]
+    pattern: "^in PostgreSQL query returns ([0-9]+) rows?:$"
+    captures:
+      - name: rowCount
+        pattern: "[0-9]+"
+        description: >
+          Expected row count. 0 asserts no matching record exists.
+          1 asserts exactly one record. Values > 1 assert at least N rows.
+    docstring:
+      type: sql
+      content_pattern: "^(?!\\s*$)\\s*SELECT\\s[\\s\\S]+$"
+      special_values:
+        - token: "'{[a-z][a-zA-Z0-9]+}'"
+          description: >
+            Context variable in a SQL single-quoted literal.
+            Replaced at runtime (e.g. '{orderId}' → '42').
+    description: >
+      Runs the SQL SELECT against this scenario's database and asserts the
+      number of rows returned. The query must begin with SELECT; a DML statement
+      here is a violation reported by realspec validate, not a runtime error.
+      On the e2e surface this is the step that makes a click provable: after a
+      real button press, the row either landed or it did not, and no amount of
+      correct-looking DOM substitutes for it.
+      Fails printing the expected and actual counts and the query as executed
+      after context-variable substitution.
+
+  # ── E2E: Browser Setup ──────────────────────────────────────────────────────
+  #
+  # There is no step that establishes a session. A scenario that needs one signs
+  # in the way a person does — `visit "/login"`, two `fill` steps, a `click` —
+  # which is four lines of the same vocabulary every other browser step is
+  # written in, and which exercises the login page instead of going around it.
+
+  - id: locale_is
+    keywords: [Given, And]
+    pattern: "^locale is \"([a-z]{2}_[A-Z]{2})\"$"
+    captures:
+      - name: locale
+        pattern: "[a-z]{2}_[A-Z]{2}"
+        description: Locale identifier, e.g. zh_TW or en_US.
+    docstring: ~
+    description: >
+      Selects the UI locale for this scenario: sets the app's locale cookie on
+      the browser context and the matching Accept-Language header, and loads the
+      same catalogue into the step runner so that "@key" locators resolve to the
+      strings this locale renders.
+      Must appear before the first navigation of the scenario; a Background may
+      set a default and a scenario may override it, in which case the last one
+      before the first visit wins. Appearing after a page has loaded is not
+      supported and fails the step, because the already-rendered page would then
+      disagree with the catalogue the locators are resolved against.
+      Fails if the locale is not one the app ships (zh_TW, en_US).
+
+  # ── E2E: Navigation and Interaction ─────────────────────────────────────────
+
+  - id: visit
+    keywords: [Given, When, And]
+    pattern: "^visit \"(/[^\"]*)\"$"
+    captures:
+      - name: path
+        pattern: "/[^\"]*"
+        description: >
+          Site-relative path, always starting with /. It is resolved against the
+          scenario's own base URL (https://127.0.0.1:<its own port>), so a
+          feature never names an origin.
+    docstring: ~
+    description: >
+      Navigates to the path and waits for the SPA to finish its initial render
+      (network idle plus the app's hydration marker). Does NOT assert the
+      resulting URL: a page that redirects an unauthenticated visitor to /login
+      is a legitimate outcome, and the feature states it with page_url_is.
+      Fails on a navigation error or a non-2xx document response.
+
+  - id: go_back
+    keywords: [When, And]
+    pattern: "^go back$"
+    docstring: ~
+    description: >
+      Triggers the browser's Back button and waits for the resulting render the
+      same way visit does. Fails if there is no previous entry in this context's
+      history.
+
+  - id: click
+    keywords: [When, And]
+    pattern: "^click \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\"$"
+    captures:
+      - name: locator
+        description: Locator token; see the locator grammar at the top of this file.
+    docstring: ~
+    description: >
+      Resolves the locator, waits for the element to be visible and enabled,
+      clicks it, and then waits for whatever the click set in motion to finish
+      the same way visit does — network idle plus the app's hydration marker.
+      That trailing wait is what makes a click composable: the step after it
+      sees the page the click produced, so a scenario can sign in with
+      `click "button:@auth.signIn"` and navigate on the next line without a
+      timeout, a retry or a sleep standing between them. It is a condition, not
+      a duration: a click that changes nothing costs one idle check.
+      Strict by design: if the locator resolves to more than one element the
+      step fails with Playwright's strict-mode message listing the matches,
+      rather than acting on the first one.
+      Fails if no element matches within the default timeout, naming the locator
+      as written in the feature and, for an "@key" locator, the string the key
+      resolved to in the active locale.
+
+  - id: fill
+    keywords: [When, And]
+    pattern: "^fill \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" with \"([^\"]*)\"$"
+    captures:
+      - name: locator
+        description: Locator token of an editable field (textbox, combobox, spinbutton…).
+      - name: value
+        pattern: "[^\"]*"
+        description: >
+          Text to enter. An empty string clears the field. {contextVar} tokens
+          are substituted before typing.
+    docstring: ~
+    description: >
+      Waits for the field to be visible and editable, clears it, and enters the
+      value, emitting the same input events a user would.
+      Fails on a non-editable or ambiguous target, and on a missing context
+      variable referenced by the value.
+
+  - id: press_key
+    keywords: [When, And]
+    pattern: "^press \"([A-Za-z0-9+]+)\"$"
+    captures:
+      - name: key
+        pattern: "[A-Za-z0-9+]+"
+        description: >
+          A Playwright key name, optionally with modifiers joined by +
+          (e.g. "Enter", "Escape", "Control+Enter").
+    docstring: ~
+    description: >
+      Sends the key combination to the element that currently has focus, or to
+      the page body when nothing is focused.
+      Fails on an unknown key name. Used for keyboard submits — the accessible
+      path a click-only test never covers.
+
+  # ── E2E: Assertions ─────────────────────────────────────────────────────────
+
+  - id: page_url_is
+    keywords: [Then, And]
+    pattern: "^page URL is \"(/[^\"]*)\"$"
+    captures:
+      - name: path
+        pattern: "/[^\"]*"
+        description: >
+          Expected site-relative path, including any query string, excluding the
+          origin. {contextVar} tokens are substituted before comparison.
+    docstring: ~
+    description: >
+      Waits until the address bar's path (plus query) equals the expected value,
+      up to the default timeout, then passes. Polling rather than sampling once
+      is what makes it usable directly after a click that triggers a client-side
+      route change.
+      Comparison is exact, not prefix — "/products" does not match
+      "/products?page=2". Fails reporting the actual URL.
+
+  - id: element_visibility
+    keywords: [Then, And]
+    pattern: "^\"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" is (visible|hidden)$"
+    captures:
+      - name: locator
+        description: Locator token.
+      - name: state
+        pattern: "visible|hidden"
+        description: >
+          visible — present in the DOM and rendered with a non-empty box.
+          hidden — absent from the DOM, or present but not rendered. Both count
+          as hidden on purpose: a feature should not have to know which way the
+          app chose to remove an element.
+    docstring: ~
+    description: >
+      Waits for the locator to reach the given state, up to the default timeout.
+      Strict: if more than one element matches, the step fails rather than
+      reporting the state of the first.
+      Fails reporting the state actually observed when the timeout expires.
+
+  - id: element_text_is
+    keywords: [Then, And]
+    pattern: "^text of \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" is \"([^\"]*)\"$"
+    captures:
+      - name: locator
+        description: Locator token.
+      - name: expected
+        pattern: "[^\"]*"
+        description: >
+          Expected text. Compared after whitespace normalisation (runs of
+          whitespace collapsed to one space, ends trimmed). {contextVar} tokens
+          are substituted first; an empty string asserts the element renders no
+          text at all.
+    docstring: ~
+    description: >
+      Waits for the element's accessible text (innerText, whitespace-normalised)
+      to equal the expected string. Equality, not containment — containment is
+      how a test ends up passing on a table header.
+      Fails reporting both strings with the normalisation already applied.
+
+  - id: region_contains
+    keywords: [Then, And]
+    pattern: "^region \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" contains:$"
+    captures:
+      - name: locator
+        description: Locator token of the container element to scope the match to.
+    docstring:
+      type: json
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+      special_values:
+        - token: "\"<non-null>\""
+          description: >
+            Asserts the element exists inside the region and its normalised text
+            is non-empty. An element that renders an empty string fails.
+        - token: "\"{[a-z][a-zA-Z0-9]+}\""
+          description: >
+            Context variable resolved from the scenario's state bag before
+            comparison (e.g. "{orderId}").
+        - token: "\"<outlineParam>\""
+          description: >
+            Scenario Outline parameter, substituted from the Examples table
+            before the step runs.
+    description: >
+      The browser-side twin of response_body_contains, with the same semantics:
+      a partial match. The docstring is a flat JSON object whose KEYS are
+      locator tokens resolved WITHIN the region, and whose VALUES are the text
+      those elements must render (whitespace-normalised, compared for equality).
+      Only the keys listed are checked; anything else inside the region is
+      ignored, so the assertion does not break when a column is added.
+      Fails on the first key whose element is missing, ambiguous, or whose text
+      differs — naming the key, the expected text and the actual text. A missing
+      key is reported as missing, never silently treated as empty.
+
+  - id: list_row_count
+    keywords: [Then, And]
+    pattern: "^list \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" has (\\d+) rows?$"
+    captures:
+      - name: locator
+        description: >
+          Locator token matching EVERY row of the list — typically the family
+          testid the rows share, e.g. "testid:order-row" against rows rendered
+          as data-testid="order-row-12" (see the hyphen-family rule at the top
+          of this file). Unlike every other assertion this one is deliberately
+          non-strict about multiplicity — counting is its purpose.
+      - name: count
+        pattern: "\\d+"
+        description: Exact expected number of matching elements.
+    docstring: ~
+    description: >
+      Waits until the number of elements matching the locator equals count, up
+      to the default timeout, then passes.
+      The count is EXACT. There is no "at least" form: ">= 1" is the assertion
+      that let an empty table pass as a populated one, and it is not expressible
+      here. 0 is a legitimate expectation and asserts the list is empty.
+      Fails reporting the expected and the last observed count.
+
+  - id: row_contains
+    keywords: [Then, And]
+    pattern: "^row (\\d+) of \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" contains:$"
+    captures:
+      - name: index
+        pattern: "\\d+"
+        description: 1-based row index in document order.
+      - name: locator
+        description: Locator token matching every row of the list.
+    docstring:
+      type: json
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+      special_values:
+        - token: "\"<non-null>\""
+          description: Element exists within the row and its normalised text is non-empty.
+        - token: "\"{[a-z][a-zA-Z0-9]+}\""
+          description: Context variable resolved before comparison.
+        - token: "\"<outlineParam>\""
+          description: Scenario Outline parameter substituted from the Examples table.
+    description: >
+      Identical to region_contains, except the region is the Nth element
+      matching the row locator instead of a single named container.
+      Fails if fewer than `index` rows exist, reporting how many there are, so
+      an off-by-one is never reported as a missing key.
+
+  - id: network_request_responded
+    keywords: [Then, And]
+    pattern: "^network request \"(GET|POST|PUT|PATCH|DELETE) ([^\"]+)\" responded (\\d{3})$"
+    captures:
+      - name: method
+        pattern: "GET|POST|PUT|PATCH|DELETE"
+        description: HTTP method (uppercase).
+      - name: path
+        pattern: "[^\"]+"
+        description: >
+          Path of the request URL, compared exactly and without the origin or
+          query string (e.g. /api/v1/orders). API paths named here must exist in
+          spec/openapi/openapi.yaml.
+      - name: status
+        pattern: "\\d{3}"
+        description: Expected response status code.
+    docstring: ~
+    description: >
+      Asserts that, at some point during this scenario, the page issued a
+      request with this method and path and received this status. The scenario's
+      network log is recorded from the first navigation onward, so a request
+      made before the assertion step is found without any waiting; if it has not
+      happened yet the step waits for it up to the default timeout.
+      Matches the most recent request with that method and path.
+      Fails listing every request recorded for that path with its status, or
+      stating that none was made.
+
+  - id: console_has_no_errors
+    keywords: [Then, And]
+    pattern: "^console has no errors$"
+    docstring: ~
+    description: >
+      Asserts that the browser console recorded no `error`-level message and no
+      uncaught exception since the scenario started, and that no request failed
+      at the transport level.
+      Fails printing every error collected with its source location. Warnings
+      and `info` are ignored.
+      Taken literally: there is no allow-list of excusable messages, because the
+      wording of a browser's console entry belongs to the browser and the same
+      wording carries real failures. A page that provokes an expected error must
+      stop provoking it — which is why the API sets a readable session hint
+      beside its HttpOnly token, so that an anonymous page load asks no
+      protected endpoint and produces no 401 (see spec.md, "Authentication").
+      The one outcome that is not a failure is a request the page itself
+      cancelled (a link prefetch abandoned when the visitor navigates): it never
+      reached the transport level and never produced an answer, and an abort
+      that mattered surfaces as a missing element in the assertion that needed
+      it.
+
+  - id: save_text_as
+    keywords: [Then, When, And]
+    pattern: "^save text of \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" as \"([a-z][a-zA-Z0-9]+)\"$"
+    produces: varName
+    captures:
+      - name: locator
+        description: Locator token of the element to read.
+      - name: varName
+        description: >
+          Context variable name; usable afterwards as {varName} inside SQL and
+          JSON docstrings and inside a testid locator segment.
+    docstring: ~
+    description: >
+      The browser-side twin of save_response_body_field. Waits for the element,
+      reads its whitespace-normalised text, and stores it in the scenario's
+      context bag.
+      Fails if the element is missing or ambiguous, or if its text is empty —
+      saving "" would make every later interpolation quietly wrong.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DOCSTRING TYPES
+# ─────────────────────────────────────────────────────────────────────────────
+
+docstring_types:
+
+  sql:
+    marker: "sql"
+    marker_pattern: "^sql$"
+    content_must_not_be_empty: true
+    context_var_pattern: "\\{[a-z][a-zA-Z0-9]+\\}"
+    context_var_delimiter: "single-quote"
+
+  json:
+    marker: "json"
+    marker_pattern: "^json$"
+    content_must_not_be_empty: true
+    must_be_valid_json_after_substitution: true
+    context_var_pattern: "\\{[a-z][a-zA-Z0-9]+\\}"
+    context_var_delimiter: "double-quote"
+    special_value_pattern: "\"<non-null>\""
+    outline_param_pattern: "\"<[a-zA-Z][a-zA-Z0-9]+>\""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCENARIO OUTLINE SUBSTITUTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+outline_substitution:
+  token_pattern: "<([a-zA-Z][a-zA-Z0-9]*)>"
+  scope:
+    - step_text
+    - docstring
+  description: >
+    Tokens matching <columnName> in both step text and docstrings are replaced
+    with the corresponding column value from the Examples table before the step
+    definition receives the string.

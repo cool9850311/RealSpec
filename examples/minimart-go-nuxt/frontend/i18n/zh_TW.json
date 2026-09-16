@@ -1,0 +1,48 @@
+{
+  "app": {
+    "name": "minimart",
+    "redirecting": "正在前往商品目錄…"
+  },
+  "nav": {
+    "primary": "主導覽",
+    "products": "商品",
+    "orders": "訂單"
+  },
+  "auth": {
+    "title": "登入",
+    "username": "使用者名稱",
+    "password": "密碼",
+    "signIn": "登入",
+    "invalidCredentials": "使用者名稱或密碼不正確。",
+    "unexpectedError": "登入失敗，請再試一次。"
+  },
+  "shop": {
+    "title": "商品目錄",
+    "unlimited": "無限",
+    "redeem": "兌換",
+    "insufficientPoints": "您的點數不足。",
+    "outOfStock": "此商品已無庫存。",
+    "productNotFound": "此商品已不再提供。",
+    "unexpectedError": "兌換失敗，請再試一次。",
+    "empty": "目前沒有任何商品。",
+    "loading": "正在載入商品目錄…",
+    "columnName": "商品",
+    "columnCost": "所需點數",
+    "columnStock": "庫存",
+    "columnRedeem": "兌換",
+    "loadFailed": "無法載入商品目錄，請再試一次。"
+  },
+  "orders": {
+    "title": "我的訂單",
+    "empty": "您尚未兌換任何商品。",
+    "loading": "正在載入您的訂單…",
+    "columnId": "訂單編號",
+    "columnProduct": "商品",
+    "columnCost": "已花費點數",
+    "columnCreatedAt": "兌換時間",
+    "loadFailed": "無法載入您的訂單，請再試一次。"
+  },
+  "session": {
+    "points": "點數餘額"
+  }
+}

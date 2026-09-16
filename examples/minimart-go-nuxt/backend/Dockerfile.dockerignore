@@ -1,0 +1,13 @@
+# Build-context exclusions for backend/Dockerfile.
+#
+# The context is the whole example directory, so everything belonging to the
+# front end or to local tooling would otherwise be uploaded to the daemon for a
+# build that only ever copies backend/.
+.git
+**/node_modules
+frontend/.nuxt
+frontend/.output
+frontend/dist
+frontend/test-results
+frontend/playwright-report
+local/certs

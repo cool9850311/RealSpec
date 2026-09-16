@@ -1,0 +1,57 @@
+# Minimal step registry for the CLI fixtures.
+#
+# Mirrors the shape of the original format.yml, trimmed to the
+# handful of steps the tests need. `content_pattern` is present on purpose:
+# validate.py never enforces it, and neither may this port.
+
+steps:
+
+  - id: run_migration
+    keywords: [Given]
+    pattern: "^run migration$"
+    docstring: ~
+    description: Runs pending migrations.
+
+  - id: exec_postgresql
+    keywords: [Given, And]
+    pattern: "^in PostgreSQL:$"
+    docstring:
+      type: sql
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+    description: Executes raw SQL.
+
+  - id: postgresql_query_returns
+    keywords: [Then, And, Given]
+    pattern: "^in PostgreSQL query returns ([0-9]+) rows?:$"
+    docstring:
+      type: sql
+      content_pattern: "^(?!\\s*$)\\s*SELECT\\s[\\s\\S]+$"
+    description: Asserts a SELECT row count.
+
+  - id: http_request
+    keywords: [When]
+    pattern: "^(GET|POST|PUT|PATCH|DELETE) (/api/v1/[a-zA-Z0-9/{}:._?=&%-]+):$"
+    docstring:
+      type: json
+      schema:
+        headers:
+          required: false
+        body:
+          required: false
+    description: Sends an HTTP request.
+
+  - id: response_status
+    keywords: [Then, And]
+    pattern: "^response status is ([1-5][0-9]{2})$"
+    docstring: ~
+    description: Asserts the status code.
+
+  - id: response_body_contains
+    keywords: [Then, And]
+    pattern: "^response body contains:$"
+    docstring:
+      type: json
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+      special_values:
+        - token: "\"<non-null>\""
+    description: Partial JSON match.

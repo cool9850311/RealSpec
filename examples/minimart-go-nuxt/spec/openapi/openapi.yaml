@@ -1,0 +1,582 @@
+openapi: "3.1.0"
+
+info:
+  title: minimart API
+  version: "1.0.0"
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  description: |
+    The reference application of the RealSpec standard: login, product list, and
+    points redemption.
+
+    ## Authentication
+    A JWT (HS256, shared secret) is delivered in the HttpOnly `token` cookie by
+    `POST /auth/login`. Endpoints marked `security: []` need no cookie.
+    - Claims: `sub` (user id as string), `username`, `role` (`guest` | `admin`), `exp`.
+    - The `role` claim is **not** an authorisation decision. An endpoint that
+      requires a role re-reads `users.role` for the token's subject before the
+      handler runs, so a correctly signed token claiming `admin` for a row that
+      says `guest` is answered `403 FORBIDDEN`. A JWT is not revocable; the
+      database is.
+    - `Set-Cookie: token=<jwt>; Path=/; HttpOnly; SameSite=Lax` — plus `Secure`
+      when the deployment terminates TLS (`COOKIE_SECURE=true`).
+    - A second cookie is sent with it: `session_hint=1`, same attributes but
+      **not** HttpOnly. It is a flag, not a credential — no endpoint reads it and
+      forging it yields nothing but a 401. It exists because the token is
+      HttpOnly and therefore invisible to script, which leaves a single-page
+      front end unable to tell "signed out" from "signed in" without calling a
+      protected endpoint and letting it fail. Every 401 from a protected
+      endpoint expires the hint (`session_hint=; Max-Age=0`), so a stale one
+      costs exactly one request.
+    - There is no CSRF token and no refresh token. Authentication exists here to
+      give the test suites a protected surface, not as a study of auth.
+    - **There is no logout endpoint**, and that is a decision, not an omission.
+      The server keeps no session state to clear, so a logout route would have
+      nothing to do but expire two cookies — and the only one script cannot
+      reach is the one a browser is going to discard on its own when `exp`
+      passes or the window closes. A front end that needs to sign out sooner
+      deletes the `session_hint` flag, which is all script can reach and all
+      the front end was ever reading.
+
+    ## Error format
+    Every error is a flat object with one key:
+
+    ```json
+    { "error": "INSUFFICIENT_POINTS" }
+    ```
+
+    The code is a stable identifier. Human-readable text is the front end's
+    responsibility and lives in its i18n catalogue.
+
+servers:
+  - url: "https://{host}/api/v1"
+    description: >
+      Deployed environment. `host` is supplied by the deployment configuration;
+      real hostnames are deliberately not baked into this spec. The `/api`
+      prefix is the reverse proxy's route to the backend (see local/Caddyfile),
+      which is why the front-end bundle can ship a relative API base.
+    variables:
+      host:
+        default: YOUR_DOMAIN
+        description: Public hostname, e.g. 127.0.0.1 for the local stack.
+  - url: "http://{host}/api/v1"
+    description: Backend reached directly, bypassing the proxy.
+    variables:
+      host:
+        default: localhost:8080
+        description: Host and port the Go service listens on.
+
+security:
+  - CookieAuth: []
+
+tags:
+  - name: Auth
+    description: Login and self lookup
+  - name: Products
+    description: Product catalogue (public)
+  - name: Orders
+    description: Points redemption and order history
+  - name: Admin
+    description: Endpoints that require the caller's stored role to be `admin`
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────────────────────────────────────────
+
+paths:
+
+  /auth/login:
+    post:
+      operationId: login
+      summary: Log in and receive the token cookie
+      tags: [Auth]
+      security: []
+      description: |
+        Verifies `password` against `users.password_hash` (bcrypt) and, on
+        success, sets the `token` cookie and the readable `session_hint` flag
+        beside it. The response body never contains the password hash or the
+        token itself — the token is only ever a cookie.
+
+        Unknown username and wrong password produce the identical
+        `401 INVALID_CREDENTIALS`, so the endpoint does not disclose which
+        usernames exist.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Logged in; session cookie set
+          headers:
+            Set-Cookie:
+              description: |
+                Sent twice: the session and the readable flag beside it.
+                  token=<jwt>; Path=/; HttpOnly; SameSite=Lax[; Secure]
+                  session_hint=1; Path=/; SameSite=Lax[; Secure]
+              schema:
+                type: string
+              example: "token=eyJhbGciOiJIUzI1NiIs...; Path=/; HttpOnly; SameSite=Lax; Secure"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401":
+          description: Unknown username or wrong password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                default:
+                  value: { error: "INVALID_CREDENTIALS" }
+
+  /me:
+    get:
+      operationId: getMe
+      summary: The caller's own profile and points balance
+      tags: [Auth]
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /products:
+    get:
+      operationId: listProducts
+      summary: List active products
+      tags: [Products]
+      security: []
+      description: |
+        Returns every product whose `active` is true, ordered by `id` ascending.
+        Inactive products are absent from the list and are also unredeemable —
+        `POST /orders` answers `404 PRODUCT_NOT_FOUND` for them.
+
+        `stock` is the number of units left, or `-1` for unlimited.
+
+        The list is not paginated: the catalogue of this example is small on
+        purpose, and `total` is present so the shape matches a paginated list if
+        a later example needs one.
+      responses:
+        "200":
+          description: The active catalogue
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductList"
+
+  /orders:
+    get:
+      operationId: listMyOrders
+      summary: List the caller's own orders
+      tags: [Orders]
+      description: |
+        Returns only orders whose `user_id` equals the JWT subject, newest
+        first. The filter is applied in SQL; there is no way to ask for another
+        user's orders.
+      responses:
+        "200":
+          description: The caller's orders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderList"
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+    post:
+      operationId: createOrder
+      summary: Redeem a product for points
+      tags: [Orders]
+      description: |
+        Deducts `products.cost_points` from the caller's balance, decrements the
+        product's stock unless it is unlimited (`-1`), and inserts an order —
+        all three in one transaction. Any failure leaves all three untouched.
+
+        Error precedence is fixed, and it is fixed so that the answer to one
+        request does not depend on what other shoppers are doing:
+
+        1. `404 PRODUCT_NOT_FOUND` — no such product, or `active` is false
+        2. `422 INSUFFICIENT_POINTS` — balance below `cost_points`
+        3. `422 OUT_OF_STOCK` — `stock` is 0
+
+        A caller who cannot afford the product is told about their points
+        before they are told about stock. Were the order reversed, the same
+        caller making the same request would be told something different as
+        the last unit came and went, and the message would look like a
+        symptom of their own request rather than of the shelf.
+
+        Concurrent redemptions of the last unit are serialised by
+        `SELECT … FOR UPDATE` on the product row; exactly one succeeds.
+
+        The endpoint is intentionally **not** idempotent: two requests are two
+        redemptions. That is the correct behaviour for a shop, and a
+        double-submit from a UI is therefore two orders.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrderRequest"
+      responses:
+        "201":
+          description: Redeemed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateOrderResponse"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404":
+          description: >
+            Product does not exist, or `active` is false. Inactive is 404 and
+            not 403 or 422 because to a caller who is not an admin an inactive
+            product does not exist: GET /products never listed it, so no
+            product_id a client could legitimately hold names one. 403 would
+            answer a question about authority that was not asked, and 422 would
+            concede that the id is real and merely unsatisfiable today — which
+            is a fact about the catalogue this caller is not entitled to.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                default:
+                  value: { error: "PRODUCT_NOT_FOUND" }
+        "422":
+          description: The redemption is refused; nothing was written
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                insufficientPoints:
+                  summary: Balance below cost_points
+                  value: { error: "INSUFFICIENT_POINTS" }
+                outOfStock:
+                  summary: stock is 0
+                  value: { error: "OUT_OF_STOCK" }
+
+  /admin/orders:
+    get:
+      operationId: listAllOrders
+      summary: List every user's orders
+      tags: [Admin, Orders]
+      description: |
+        Returns every order in the system, newest first, each carrying the
+        username of the user who placed it. The shape mirrors `GET /orders`
+        with one extra field, `username`.
+
+        Authorisation is decided before the query runs, and it is decided from
+        the database: the caller's `users.role` must be `admin`. The token's own
+        `role` claim is never consulted, so a correctly signed token that
+        claims `admin` for a `guest` row is `403`, not `200`.
+
+        The two listings are separate SQL statements rather than one query with
+        a conditional `WHERE` — a filter that a parameter can switch off is a
+        filter that a bug can switch off.
+
+        Like `GET /products` the list is not paginated; `total` is present so
+        the shape matches a paginated list if a later example needs one.
+      responses:
+        "200":
+          description: Every order, newest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminOrderList"
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPONENTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+components:
+
+  securitySchemes:
+    CookieAuth:
+      type: apiKey
+      in: cookie
+      name: token
+      description: |
+        HttpOnly JWT cookie set by POST /auth/login. HS256, signed with
+        JWT_SECRET. Claims: sub (user id as string), username, role
+        ('guest' | 'admin'), exp (24h after issue).
+        A missing, malformed or expired cookie yields 401 UNAUTHENTICATED.
+        This is the only cookie that carries authority: the `session_hint`
+        cookie set alongside it is never read by the API.
+
+  schemas:
+
+    Role:
+      type: string
+      enum: [guest, admin]
+      description: >
+        The role stored on the user's row. 'admin' may call GET /admin/orders;
+        'guest' may not. Where this appears in a token it is a statement about
+        the moment the token was issued, and no endpoint authorises on it — the
+        stored value is re-read per request.
+
+    Error:
+      type: object
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          enum:
+            - INVALID_REQUEST
+            - INVALID_CREDENTIALS
+            - UNAUTHENTICATED
+            - FORBIDDEN
+            - PRODUCT_NOT_FOUND
+            - INSUFFICIENT_POINTS
+            - OUT_OF_STOCK
+            - INTERNAL_ERROR
+          description: Stable machine-readable error code.
+          examples:
+            - "INSUFFICIENT_POINTS"
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      additionalProperties: false
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 64
+          examples: ["alice"]
+        password:
+          type: string
+          minLength: 1
+          format: password
+          examples: ["secret123"]
+
+    LoginResponse:
+      type: object
+      required: [username, role]
+      properties:
+        username:
+          type: string
+          examples: ["alice"]
+        role:
+          $ref: "#/components/schemas/Role"
+
+    Me:
+      type: object
+      required: [username, role, points]
+      properties:
+        username:
+          type: string
+          examples: ["alice"]
+        role:
+          $ref: "#/components/schemas/Role"
+        points:
+          type: integer
+          minimum: 0
+          description: Current points balance.
+          examples: [100]
+
+    Product:
+      type: object
+      required: [id, name, cost_points, stock]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          examples: [1]
+        name:
+          type: string
+          examples: ["Sticker Pack"]
+        cost_points:
+          type: integer
+          minimum: 1
+          description: Points charged per redemption; always greater than 0.
+          examples: [50]
+        stock:
+          type: integer
+          minimum: -1
+          description: Units remaining, or -1 for unlimited.
+          examples: [3]
+
+    ProductList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Product"
+        total:
+          type: integer
+          minimum: 0
+          description: Number of entries in `items`. The list is not paginated.
+          examples: [1]
+
+    Order:
+      type: object
+      required: [id, product_name, cost_points, created_at]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          examples: [1]
+        product_name:
+          type: string
+          description: >
+            The product's name as it is now. The price, unlike the name, is
+            frozen at redemption time in orders.cost_points.
+          examples: ["Sticker Pack"]
+        cost_points:
+          type: integer
+          minimum: 1
+          description: Points actually paid, as recorded on the order row.
+          examples: [50]
+        created_at:
+          type: string
+          format: date-time
+          examples: ["2026-01-01T00:00:00Z"]
+
+    OrderList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Order"
+        total:
+          type: integer
+          minimum: 0
+          examples: [1]
+
+    AdminOrder:
+      type: object
+      required: [id, username, product_name, cost_points, created_at]
+      description: >
+        An Order with the owning user's name added. It is declared separately
+        rather than as an allOf extension of Order, because the two responses
+        are two contracts: adding a field to the admin listing must not be able
+        to widen what GET /orders returns to its own caller.
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          examples: [1]
+        username:
+          type: string
+          description: The username of the user who placed the order.
+          examples: ["alice"]
+        product_name:
+          type: string
+          description: >
+            The product's name as it is now. The price, unlike the name, is
+            frozen at redemption time in orders.cost_points.
+          examples: ["Sticker Pack"]
+        cost_points:
+          type: integer
+          minimum: 1
+          description: Points actually paid, as recorded on the order row.
+          examples: [50]
+        created_at:
+          type: string
+          format: date-time
+          examples: ["2026-01-01T00:00:00Z"]
+
+    AdminOrderList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminOrder"
+        total:
+          type: integer
+          minimum: 0
+          examples: [1]
+
+    CreateOrderRequest:
+      type: object
+      required: [product_id]
+      additionalProperties: false
+      properties:
+        product_id:
+          type: integer
+          minimum: 1
+          description: Id of an active product.
+          examples: [1]
+
+    CreateOrderResponse:
+      type: object
+      required: [id, cost_points, balance_after]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          description: Id of the newly inserted order row.
+          examples: [1]
+        cost_points:
+          type: integer
+          minimum: 1
+          description: Points deducted by this redemption.
+          examples: [50]
+        balance_after:
+          type: integer
+          minimum: 0
+          description: The caller's balance after the transaction committed.
+          examples: [50]
+
+  responses:
+
+    InvalidRequest:
+      description: Malformed body, or a field that fails validation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            default:
+              value: { error: "INVALID_REQUEST" }
+
+    Forbidden:
+      description: >
+        The caller is authenticated and their stored role is not the one this
+        endpoint requires. Deliberately not a hidden 404: the endpoint is
+        published in this document, so its existence is not a secret a 404
+        could keep, and answering one would be the API telling a caller
+        something it knows to be false — they would retry, or report a bug
+        against a route behaving exactly as specified. A 404 conceals a
+        resource; here there is no resource the caller may not know about, only
+        an authority they do not have, and 403 is the code that says precisely
+        that.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            default:
+              value: { error: "FORBIDDEN" }
+
+    Unauthenticated:
+      description: The token cookie is missing, malformed or expired
+      headers:
+        Set-Cookie:
+          description: "session_hint=; Path=/; Max-Age=0; SameSite=Lax[; Secure] \u2014 expires the readable flag, so the caller stops asking"
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            default:
+              value: { error: "UNAUTHENTICATED" }

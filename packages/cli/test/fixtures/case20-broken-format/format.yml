@@ -1,0 +1,4 @@
+steps:
+  - id: run_migration
+    keywords: [Given
+    pattern: "^run migration$"

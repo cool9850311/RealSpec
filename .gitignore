@@ -1,0 +1,17 @@
+node_modules/
+dist
+*.log
+.DS_Store
+.nuxt/
+.output/
+test-results/
+playwright-report/
+.features-gen/
+.playwright-mcp/
+
+# Run output, all of it. Logs, traces, container output, and the Markdown
+# summaries written on top of them — every file in here is a record of one
+# execution on one machine, and goes stale the moment anything changes. The
+# reasoning worth keeping was written into the code, the spec and PLAN.md as it
+# was found, which is where a reader will actually look for it.
+reports/

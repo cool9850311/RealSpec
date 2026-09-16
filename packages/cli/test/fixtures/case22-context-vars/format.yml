@@ -1,0 +1,39 @@
+# Fixture registry for the context-variable check: a provided set plus one
+# step that declares `produces`.
+
+context_variables:
+  provided:
+    tokenExpired: A correctly signed token whose lifetime has run out.
+
+steps:
+
+  - id: run_migration
+    keywords: [Given]
+    pattern: "^run migration$"
+    docstring: ~
+    description: Runs pending migrations.
+
+  - id: http_request
+    keywords: [When, Given]
+    pattern: "^(GET|POST|PUT|PATCH|DELETE) (/api/v1/[a-zA-Z0-9/{}:._?=&%-]+):$"
+    docstring:
+      type: json
+    description: Sends an HTTP request.
+
+  - id: response_status
+    keywords: [Then, And]
+    pattern: "^response status is ([1-5][0-9]{2})$"
+    docstring: ~
+    description: Asserts the status code.
+
+  - id: save_response_body_field
+    keywords: [And, Then, Given]
+    pattern: "^save response body field \"([a-zA-Z_][a-zA-Z0-9_]*)\" as \"([a-z][a-zA-Z0-9]+)\"$"
+    produces: varName
+    captures:
+      - name: field
+        description: Top-level field of the last response body.
+      - name: varName
+        description: Name the value is stored under.
+    docstring: ~
+    description: Saves a response body field as a context variable.

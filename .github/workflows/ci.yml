@@ -1,0 +1,170 @@
+# minimart — CI
+#
+# Every path here is relative to the repository root, so this file is the
+# example's pipeline rather than a template to copy: a new project writes its
+# own paths. What travels is the shape, not the file — three stages, in this
+# order, and a failure in an earlier one stops the later ones.
+#
+#   1. validate   the specification is well-formed before anything runs
+#   2. api        scenarios whose When is an HTTP call          (godog)
+#   3. e2e        scenarios whose When is a real browser action (playwright-bdd)
+#
+# Stage 1 is first because it is the only stage that costs nothing: a feature
+# file naming a step that does not exist should never reach a container.
+#
+# Stages 2 and 3 both start containers per scenario, so the runner needs a
+# working Docker daemon — ubuntu-latest has one. They are separate, sequential
+# jobs rather than parallel ones: both saturate the runner's CPU with container
+# startups, and competing for it turns a timing-sensitive suite flaky.
+#
+# Every command below is the command that is run locally. There is no CI-only
+# variant, no relaxed timeout and no retry: a suite that needs different
+# settings to pass on a runner is not passing. Concurrency is not set here
+# either: both runners halve the machine's CPU count themselves, which is the
+# only number that is right on a 2-vCPU runner and on a developer's laptop
+# both. GODOG_CONCURRENCY and E2E_WORKERS override, and deliberately are unset.
+#
+# Paths are written from the repository root because this example lives inside
+# the RealSpec repository. A standalone project drops the `examples/…` prefix.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    name: 1 · validate the specification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # The validator is this repository's own package. A standalone project
+      # installs it instead and calls `npx realspec validate …`.
+      - run: npm ci
+      - run: npm run build -w @realspec/cli
+
+      # The validator's own tests. One of them — the parity case — compares this
+      # validator byte for byte with the Python one it was ported from, over
+      # that project's corpus. The corpus is not in this repository, so the case
+      # skips here unless REALSPEC_PARITY_CORPUS names a checkout of it. This
+      # step passing is not a parity result.
+      - name: Validator tests (parity case skips, its corpus is not in this repository)
+        run: npm test
+
+      # format.yml is found by walking up from each feature file, so features
+      # that live inside spec/ need no path configuration.
+      - name: Validate spec features
+        run: >
+          node packages/cli/dist/cli.js validate
+          examples/minimart-go-nuxt/spec/bdd/api/*.feature
+          examples/minimart-go-nuxt/spec/bdd/e2e/*.feature
+
+      # The harness fixtures deliberately live outside spec/ — they test the
+      # harness and are not part of minimart's specification — so they need the
+      # registry pointed at explicitly.
+      - name: Validate harness fixtures
+        run: >
+          node packages/cli/dist/cli.js validate
+          --format examples/minimart-go-nuxt/spec/bdd/format.yml
+          examples/minimart-go-nuxt/frontend/tests/e2e/harness/features/*/*.feature
+
+  api:
+    name: 2 · API scenarios
+    runs-on: ubuntu-latest
+    needs: validate
+    defaults:
+      run:
+        working-directory: examples/minimart-go-nuxt/backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: examples/minimart-go-nuxt/backend/go.sum
+
+      - run: go vet ./...
+
+      # Formatting is a build failure, not a review comment.
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      # Builds the service image once, then one network + PostgreSQL + service
+      # container per scenario. -count=1 defeats Go's test cache: a green run
+      # must mean the scenarios actually ran.
+      - name: Unit tests and API scenarios
+        run: go test -count=1 ./...
+
+  e2e:
+    name: 3 · e2e scenarios
+    runs-on: ubuntu-latest
+    needs: api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      # In order: the two @intlify ESLint rules over the i18n catalogue, types
+      # for the app and for the harness, then the two checks whose inputs are
+      # not JavaScript — the keys and test IDs the feature files name must exist
+      # in the app. A missing element is a build failure here rather than a
+      # silently passing test later.
+      #
+      # check:bundle is not in this list: it asserts a property of the build
+      # output, so it runs as the second half of `nuxt generate`, inside the
+      # image build that the next step triggers.
+      - run: npm run check -w @minimart/frontend
+
+      # Chromium watches the kernel's netlink socket for address changes and
+      # closes every in-flight HTTP/2 session the moment one arrives (see
+      # net/spdy/spdy_session_pool.cc, OnIPAddressChanged). Starting a
+      # container from here on creates a veth, and the kernel hands it an
+      # IPv6 link-local address — that is such a change. `default`, not
+      # `all`: this only sets the template for interfaces created from this
+      # point on, so the runner's own interfaces are untouched.
+      - name: Disable IPv6 on interfaces Docker is about to create
+        # Read back rather than trust the exit code: `sysctl -w` prints
+        # "ignoring: Read-only file system" and still exits 0 where /proc/sys is
+        # not writable, which is a green step that did nothing.
+        run: |
+          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
+          test "$(cat /proc/sys/net/ipv6/conf/default/disable_ipv6)" = 1
+
+      # The certificate each scenario's proxy serves is generated, never
+      # committed. The next step's global setup runs this script too, and it is
+      # idempotent — running it here makes a missing openssl a named failure
+      # instead of one surfacing from inside the suite, and proves the file is
+      # there before anything depends on it.
+      - name: Generate the TLS certificate
+        run: |
+          examples/minimart-go-nuxt/local/certs/generate.sh
+          test -s examples/minimart-go-nuxt/local/certs/cert.pem
+
+      # Builds both images, creates the run's one network, starts the shared
+      # frontend container on it, then a PostgreSQL + backend + Caddy per
+      # scenario joining that same network — one bridge for the whole run,
+      # because creating one while a browser is running aborts its requests
+      # (see spec.md, "Isolation"). The Caddy config is local/Caddyfile — the
+      # same file local development uses.
+      - run: npm run test:e2e -w @minimart/frontend
+
+      - name: Upload failure artefacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artefacts
+          path: reports/e2e/
+          retention-days: 7

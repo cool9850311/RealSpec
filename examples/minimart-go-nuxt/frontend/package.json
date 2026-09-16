@@ -1,0 +1,43 @@
+{
+  "name": "@minimart/frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev --port 3000",
+    "build": "nuxt build",
+    "generate": "nuxt generate && npm run check:bundle",
+    "preview": "npx serve .output/public --listen 3000",
+    "postinstall": "nuxt prepare",
+    "check": "npm run check:lint && npm run check:types && npm run check:e2e && npm run check:i18n && npm run check:testids",
+    "check:types": "vue-tsc --noEmit -p .nuxt/tsconfig.json",
+    "check:i18n": "node scripts/check-i18n-keys.mjs",
+    "check:testids": "node scripts/check-testids.mjs",
+    "check:bundle": "node scripts/check-static-bundle.mjs",
+    "check:e2e": "tsc --noEmit -p tests/e2e/tsconfig.json",
+    "test:e2e": "bddgen && playwright test",
+    "test:e2e:spec": "bddgen && playwright test --project=spec",
+    "check:lint": "eslint ."
+  },
+  "dependencies": {
+    "@intlify/unplugin-vue-i18n": "^6.0.3",
+    "nuxt": "^3.21.6",
+    "vue": "^3.5.13",
+    "vue-i18n": "^11.1.0",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@intlify/eslint-plugin-vue-i18n": "^4.5.1",
+    "@playwright/test": "1.63.0",
+    "@types/dockerode": "^4.0.1",
+    "@types/pg": "^8.23.1",
+    "@typescript-eslint/parser": "^8.70.0",
+    "dockerode": "^5.0.1",
+    "eslint": "^10.10.0",
+    "pg": "^8.23.0",
+    "playwright-bdd": "9.2.1",
+    "testcontainers": "12.1.0",
+    "typescript": "^5.7.3",
+    "vue-tsc": "^2.2.0",
+    "yaml": "^2.8.1"
+  }
+}

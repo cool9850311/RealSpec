@@ -1,0 +1,3 @@
+steps:
+  - id: run_migration
+    keywords: [Given]
