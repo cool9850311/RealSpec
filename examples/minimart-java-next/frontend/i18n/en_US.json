@@ -1,0 +1,48 @@
+{
+  "app": {
+    "name": "minimart",
+    "redirecting": "Taking you to the catalogue…"
+  },
+  "nav": {
+    "primary": "Main navigation",
+    "products": "Products",
+    "orders": "Orders"
+  },
+  "auth": {
+    "title": "Sign in",
+    "username": "Username",
+    "password": "Password",
+    "signIn": "Sign in",
+    "invalidCredentials": "Incorrect username or password.",
+    "unexpectedError": "Sign-in failed. Please try again."
+  },
+  "shop": {
+    "title": "Product catalogue",
+    "unlimited": "Unlimited",
+    "redeem": "Redeem",
+    "insufficientPoints": "You do not have enough points.",
+    "outOfStock": "This product is out of stock.",
+    "productNotFound": "This product is no longer available.",
+    "unexpectedError": "The redemption failed. Please try again.",
+    "empty": "There is nothing in the catalogue right now.",
+    "loading": "Loading the catalogue…",
+    "columnName": "Product",
+    "columnCost": "Cost",
+    "columnStock": "Stock",
+    "columnRedeem": "Redeem",
+    "loadFailed": "The catalogue could not be loaded. Please try again."
+  },
+  "orders": {
+    "title": "My orders",
+    "empty": "You have not redeemed anything yet.",
+    "loading": "Loading your orders…",
+    "columnId": "Order",
+    "columnProduct": "Product",
+    "columnCost": "Points spent",
+    "columnCreatedAt": "Redeemed at",
+    "loadFailed": "Your orders could not be loaded. Please try again."
+  },
+  "session": {
+    "points": "Points balance"
+  }
+}

@@ -1,0 +1,79 @@
+# Local development stack for minimart (Java 25 + Spring Boot backend,
+# Next.js static-export frontend).
+#
+# This is NOT what the e2e suite runs. The suite builds the same two images and
+# starts a fresh postgres + backend + caddy per scenario through testcontainers
+# (frontend/tests/e2e/stack.ts), sharing only one frontend container. This file
+# exists so a human can bring the app up and click around, and so the images
+# below are the ones the suite reuses: the backend image is the Spring Boot jar
+# built by backend/Dockerfile, the frontend image serves the Next.js static
+# export (out/) with `serve`.
+#
+#   local/certs/generate.sh          (first time only; the e2e suite runs it too)
+#   docker compose -f local/docker-compose.yml up --build
+#   open https://127.0.0.1
+#
+# The certificate is generated rather than committed: a private key does not
+# belong in a repository, and mkcert names its CA after the account and machine
+# that created it. See local/certs/generate.sh.
+
+# An explicit project name. Without it Compose derives the name from this
+# file's directory, "local" -- the same name any other project kept in a
+# "local/" directory gets (the go-nuxt example included). Two projects sharing a
+# name share container names (local-caddy-1, local-postgres-1, ...), so `up`
+# would recreate the other project's containers and `down -v` would remove them.
+name: minimart-java-next
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: minimart
+      POSTGRES_PASSWORD: minimart_secret
+      POSTGRES_DB: minimart
+    # fsync off: this database is disposable in dev and recreated per scenario
+    # in tests. Durability buys nothing and costs startup time.
+    command: ["postgres", "-c", "fsync=off", "-c", "full_page_writes=off", "-c", "synchronous_commit=off"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U minimart -d minimart"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    environment:
+      PORT: "8080"
+      DB_DSN: "postgres://minimart:minimart_secret@postgres:5432/minimart?sslmode=disable"
+      # At least 32 bytes: HS256 through Nimbus rejects shorter keys, and the
+      # service refuses to boot with one.
+      JWT_SECRET: "minimart-local-secret-0123456789abcdef"
+      SCHEMA_AUTO_MIGRATE: "true"
+      FRONTEND_ORIGIN: "https://127.0.0.1"
+      COOKIE_SECURE: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+    depends_on:
+      - backend
+      - frontend

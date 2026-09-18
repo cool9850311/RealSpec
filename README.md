@@ -165,9 +165,15 @@ next:
 
 ```
 1 · validate      the specification is well-formed
-2 · API scenarios godog
+2 · API scenarios godog (go-nuxt) · Cucumber-JVM via ./mvnw verify (java-next)
 3 · e2e scenarios playwright-bdd
 ```
+
+Each example has its own three stages. The pipeline runs on pull requests only,
+and only for the examples whose files the pull request changed — or for all of
+them, when it changes something they share: the validator, the root workspace,
+the scripts, the pipeline itself. An untouched example is not rebuilt to prove
+it still works.
 
 Validation goes first because it is the only stage that costs nothing. A feature
 naming a step that does not exist should never reach a container. Stages 2 and 3
@@ -199,5 +205,9 @@ cp -r examples/minimart-go-nuxt/spec your-project/
 
 Then read that example. It is a complete, working application — Go + Gin +
 PostgreSQL behind a Nuxt static SPA — and its CI is three stages: validate, API
-scenarios, e2e scenarios. See [`examples/`](./examples) for the matrix of
-examples and which axis each one varies.
+scenarios, e2e scenarios. [`minimart-java-next`](./examples/minimart-java-next)
+is the same application again — the same spec, copied and held identical by a
+check — built with Java + Spring Boot behind a Next.js static export, which is
+what it looks like when only the implementation changes. See
+[`examples/`](./examples) for the matrix of examples and which axis each one
+varies.

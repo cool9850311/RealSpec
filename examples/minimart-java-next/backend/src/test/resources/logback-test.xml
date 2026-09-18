@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Test logging. Without this file Testcontainers' docker-java client logs every
+  API call at DEBUG, which buries the Cucumber output of `./mvnw verify` under
+  wire traffic. The unit tests use the same configuration: INFO and above, one
+  line per event, on the console Surefire and Failsafe capture.
+-->
+<configuration>
+  <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+  <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+
+  <logger name="org.testcontainers" level="INFO"/>
+  <logger name="com.github.dockerjava" level="WARN"/>
+
+  <root level="INFO">
+    <appender-ref ref="CONSOLE"/>
+  </root>
+</configuration>

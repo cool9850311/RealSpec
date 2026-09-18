@@ -1,0 +1,12 @@
+# BuildKit reads <dockerfile path>.dockerignore in preference to the context
+# root's .dockerignore, which lets this image keep its exclusions next to the
+# Dockerfile that needs them while the build context stays the example root.
+**/node_modules
+frontend/.next
+frontend/out
+frontend/tests
+frontend/.features-gen
+frontend/next-env.d.ts
+backend
+local
+spec

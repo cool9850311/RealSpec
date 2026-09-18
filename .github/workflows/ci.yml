@@ -1,42 +1,133 @@
 # minimart — CI
 #
 # Every path here is relative to the repository root, so this file is the
-# example's pipeline rather than a template to copy: a new project writes its
+# examples' pipeline rather than a template to copy: a new project writes its
 # own paths. What travels is the shape, not the file — three stages, in this
 # order, and a failure in an earlier one stops the later ones.
 #
 #   1. validate   the specification is well-formed before anything runs
-#   2. api        scenarios whose When is an HTTP call          (godog)
+#   2. api        scenarios whose When is an HTTP call
+#                 (godog for go-nuxt, Cucumber-JVM for java-next)
 #   3. e2e        scenarios whose When is a real browser action (playwright-bdd)
 #
 # Stage 1 is first because it is the only stage that costs nothing: a feature
 # file naming a step that does not exist should never reach a container.
 #
+# Triggers. Pull requests only. A push to a branch that has a pull request open
+# would run everything twice, and a push to main has already been through the
+# pull request that produced it — the result of running it again there is a
+# result nobody is waiting on.
+#
+# Path filters. The `changes` job decides which examples a pull request can
+# have affected, and only those run:
+#
+#   shared     packages/**, package.json, package-lock.json, scripts/**, this
+#              file — the validator, the one npm workspace every example
+#              installs through, and the pipeline itself. A change here can
+#              break any example, so it runs all of them, plus the validator's
+#              own tests.
+#   go_nuxt    examples/minimart-go-nuxt/**
+#   java_next  examples/minimart-java-next/** — and examples/minimart-go-nuxt/
+#              spec/**, because java-next's spec is a guarded copy of that one:
+#              the parity check in its stage 1 reads both, so an edit to the
+#              original that is not mirrored must fail java-next, not only
+#              go-nuxt.
+#
+# Each example has its own three stages, and each stage needs the previous one.
+# A job whose condition is false is skipped, and so is every job that needs it —
+# that is intended: an untouched example is not rebuilt. GitHub reports a
+# skipped job as successful for branch protection, so required checks on these
+# jobs do not block a pull request that never touched their example.
+#
 # Stages 2 and 3 both start containers per scenario, so the runner needs a
 # working Docker daemon — ubuntu-latest has one. They are separate, sequential
 # jobs rather than parallel ones: both saturate the runner's CPU with container
-# startups, and competing for it turns a timing-sensitive suite flaky.
+# startups, and competing for it turns a timing-sensitive suite flaky. The two
+# examples' chains run on separate runners, so they do not compete with each
+# other.
 #
 # Every command below is the command that is run locally. There is no CI-only
 # variant, no relaxed timeout and no retry: a suite that needs different
 # settings to pass on a runner is not passing. Concurrency is not set here
-# either: both runners halve the machine's CPU count themselves, which is the
+# either: the runners halve the machine's CPU count themselves, which is the
 # only number that is right on a 2-vCPU runner and on a developer's laptop
 # both. GODOG_CONCURRENCY and E2E_WORKERS override, and deliberately are unset.
 #
-# Paths are written from the repository root because this example lives inside
-# the RealSpec repository. A standalone project drops the `examples/…` prefix.
+# Paths are written from the repository root because these examples live inside
+# the RealSpec repository. A standalone project drops the `examples/…` prefix,
+# the path filters and the per-example job prefixes.
 
 name: ci
 
 on:
-  push:
   pull_request:
 
 jobs:
-  validate:
-    name: 1 · validate the specification
+  changes:
+    name: changes
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      shared: ${{ steps.filter.outputs.shared }}
+      go_nuxt: ${{ steps.filter.outputs.go_nuxt }}
+      java_next: ${{ steps.filter.outputs.java_next }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # On pull_request the changed files come from the GitHub API, hence
+      # pull-requests: read. The checkout is not needed for that; it is there
+      # so the same step keeps working, by comparing git history instead, if
+      # another trigger is ever added.
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            shared:
+              - 'packages/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'scripts/**'
+              - '.github/workflows/ci.yml'
+            go_nuxt:
+              - 'examples/minimart-go-nuxt/**'
+            java_next:
+              - 'examples/minimart-java-next/**'
+              - 'examples/minimart-go-nuxt/spec/**'
+
+  validator-tests:
+    name: validator tests
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.shared == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build -w @realspec/cli
+
+      # The validator's own tests, then the spec-parity script's. One of the
+      # validator's — the parity case — compares this validator byte for byte
+      # with the Python one it was ported from, over that project's corpus. The
+      # corpus is not in this repository, so the case skips here unless
+      # REALSPEC_PARITY_CORPUS names a checkout of it. This step passing is not
+      # a parity result.
+      - name: Validator and spec-parity script tests (parity case skips, its corpus is not in this repository)
+        run: npm test
+
+  # ─── minimart-go-nuxt ──────────────────────────────────────────────────────
+
+  go-nuxt-validate:
+    name: go-nuxt · 1 validate
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.go_nuxt == 'true' || needs.changes.outputs.shared == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -49,14 +140,6 @@ jobs:
       # installs it instead and calls `npx realspec validate …`.
       - run: npm ci
       - run: npm run build -w @realspec/cli
-
-      # The validator's own tests. One of them — the parity case — compares this
-      # validator byte for byte with the Python one it was ported from, over
-      # that project's corpus. The corpus is not in this repository, so the case
-      # skips here unless REALSPEC_PARITY_CORPUS names a checkout of it. This
-      # step passing is not a parity result.
-      - name: Validator tests (parity case skips, its corpus is not in this repository)
-        run: npm test
 
       # format.yml is found by walking up from each feature file, so features
       # that live inside spec/ need no path configuration.
@@ -75,10 +158,11 @@ jobs:
           --format examples/minimart-go-nuxt/spec/bdd/format.yml
           examples/minimart-go-nuxt/frontend/tests/e2e/harness/features/*/*.feature
 
-  api:
-    name: 2 · API scenarios
+  go-nuxt-api:
+    name: go-nuxt · 2 API scenarios
     runs-on: ubuntu-latest
-    needs: validate
+    needs: [changes, go-nuxt-validate]
+    if: needs.changes.outputs.go_nuxt == 'true' || needs.changes.outputs.shared == 'true'
     defaults:
       run:
         working-directory: examples/minimart-go-nuxt/backend
@@ -102,10 +186,11 @@ jobs:
       - name: Unit tests and API scenarios
         run: go test -count=1 ./...
 
-  e2e:
-    name: 3 · e2e scenarios
+  go-nuxt-e2e:
+    name: go-nuxt · 3 e2e scenarios
     runs-on: ubuntu-latest
-    needs: api
+    needs: [changes, go-nuxt-api]
+    if: needs.changes.outputs.go_nuxt == 'true' || needs.changes.outputs.shared == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -167,4 +252,159 @@ jobs:
         with:
           name: e2e-artefacts
           path: reports/e2e/
+          retention-days: 7
+
+  # ─── minimart-java-next ────────────────────────────────────────────────────
+
+  java-next-validate:
+    name: java-next · 1 validate
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.java_next == 'true' || needs.changes.outputs.shared == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # The same validator, the same command: the spec does not know which
+      # language will run it.
+      - run: npm ci
+      - run: npm run build -w @realspec/cli
+
+      # format.yml is found by walking up from each feature file, so features
+      # that live inside spec/ need no path configuration.
+      - name: Validate spec features
+        run: >
+          node packages/cli/dist/cli.js validate
+          examples/minimart-java-next/spec/bdd/api/*.feature
+          examples/minimart-java-next/spec/bdd/e2e/*.feature
+
+      # The harness fixtures deliberately live outside spec/ — they test the
+      # harness and are not part of minimart's specification — so they need the
+      # registry pointed at explicitly.
+      - name: Validate harness fixtures
+        run: >
+          node packages/cli/dist/cli.js validate
+          --format examples/minimart-java-next/spec/bdd/format.yml
+          examples/minimart-java-next/frontend/tests/e2e/harness/features/*/*.feature
+
+      # This spec is a copy of go-nuxt's, and "the same domain, the same
+      # contract" is only true while the copy is exact. The script compares the
+      # two spec/ trees: every feature file byte for byte, the OpenAPI document
+      # and the step registry with only descriptions and comments allowed to
+      # differ. Anything else is named, file and path, and fails the stage, so
+      # the copy cannot drift quietly in either direction.
+      - name: Spec parity with minimart-go-nuxt
+        run: node scripts/check-spec-parity.mjs
+
+  java-next-api:
+    name: java-next · 2 API scenarios
+    runs-on: ubuntu-latest
+    needs: [changes, java-next-validate]
+    if: needs.changes.outputs.java_next == 'true' || needs.changes.outputs.shared == 'true'
+    defaults:
+      run:
+        working-directory: examples/minimart-java-next/backend
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Maven wrapper pins Maven itself; this pins the JDK. The cache is
+      # keyed on pom.xml, so a dependency change is a cache miss, not a stale
+      # artefact.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+          cache-dependency-path: examples/minimart-java-next/backend/pom.xml
+
+      # One command, the lifecycle in order: Spotless (formatting is a build
+      # failure, not a review comment), compile with -Werror, unit tests under
+      # Surefire, then — under Failsafe — the service image built once and one
+      # network + PostgreSQL + service container per Cucumber scenario. Maven
+      # has no test cache to defeat: every verify runs every scenario.
+      - name: Format, compile, unit tests and API scenarios
+        run: ./mvnw -B verify
+
+      - name: Upload failure artefacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-next-api-artefacts
+          path: |
+            examples/minimart-java-next/backend/target/cucumber-reports/
+            examples/minimart-java-next/backend/target/surefire-reports/
+            examples/minimart-java-next/backend/target/failsafe-reports/
+          retention-days: 7
+
+  java-next-e2e:
+    name: java-next · 3 e2e scenarios
+    runs-on: ubuntu-latest
+    needs: [changes, java-next-api]
+    if: needs.changes.outputs.java_next == 'true' || needs.changes.outputs.shared == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      # In order: types for the app and for the harness, the i18n catalogue,
+      # then the two checks whose inputs are not JavaScript — the keys and test
+      # IDs the feature files name must exist in the app. A missing element is
+      # a build failure here rather than a silently passing test later.
+      #
+      # check:bundle is not in this list: it asserts a property of the build
+      # output, so it runs as the second half of `next build`, inside the
+      # image build that the next step triggers.
+      - run: npm run check -w @minimart-java-next/frontend
+
+      # Chromium watches the kernel's netlink socket for address changes and
+      # closes every in-flight HTTP/2 session the moment one arrives (see
+      # net/spdy/spdy_session_pool.cc, OnIPAddressChanged). Starting a
+      # container from here on creates a veth, and the kernel hands it an
+      # IPv6 link-local address — that is such a change. `default`, not
+      # `all`: this only sets the template for interfaces created from this
+      # point on, so the runner's own interfaces are untouched.
+      - name: Disable IPv6 on interfaces Docker is about to create
+        # Read back rather than trust the exit code: `sysctl -w` prints
+        # "ignoring: Read-only file system" and still exits 0 where /proc/sys is
+        # not writable, which is a green step that did nothing.
+        run: |
+          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
+          test "$(cat /proc/sys/net/ipv6/conf/default/disable_ipv6)" = 1
+
+      # The certificate each scenario's proxy serves is generated, never
+      # committed. The next step's global setup runs this script too, and it is
+      # idempotent — running it here makes a missing openssl a named failure
+      # instead of one surfacing from inside the suite, and proves the file is
+      # there before anything depends on it.
+      - name: Generate the TLS certificate
+        run: |
+          examples/minimart-java-next/local/certs/generate.sh
+          test -s examples/minimart-java-next/local/certs/cert.pem
+
+      # Builds both images, creates the run's one network, starts the shared
+      # frontend container on it, then a PostgreSQL + backend + Caddy per
+      # scenario joining that same network — one bridge for the whole run,
+      # because creating one while a browser is running aborts its requests
+      # (see spec.md, "Isolation"). The Caddy config is local/Caddyfile — the
+      # same file local development uses.
+      - run: npm run test:e2e -w @minimart-java-next/frontend
+
+      # Its own report directory, so a run of the other example on the same
+      # machine never overwrites this one's artefacts.
+      - name: Upload failure artefacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-java-next-artefacts
+          path: reports/e2e-java-next/
           retention-days: 7

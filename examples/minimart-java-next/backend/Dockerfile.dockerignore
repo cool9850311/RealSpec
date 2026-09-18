@@ -1,0 +1,17 @@
+# Build-context exclusions for backend/Dockerfile.
+#
+# The context is the whole example directory, so everything belonging to the
+# front end, to the spec or to local tooling would otherwise be uploaded to the
+# daemon for a build that only ever copies backend/pom.xml, backend/mvnw,
+# backend/.mvn and backend/src.
+.git
+**/node_modules
+**/.DS_Store
+frontend
+local
+spec
+backend/target
+backend/.mvn/wrapper/maven-wrapper.jar
+backend/.mvn/wrapper/MavenWrapperDownloader.class
+backend/.idea
+backend/*.iml

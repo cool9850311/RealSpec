@@ -1,0 +1,66 @@
+# minimart reverse proxy.
+#
+# ONE file serves two purposes, on purpose:
+#
+#   1. local development  — `docker compose -f local/docker-compose.yml up`
+#   2. the e2e suite      — every scenario starts its own Caddy container from
+#                           this same file (see frontend/tests/e2e/stack.ts)
+#
+# That is the whole point of RealSpec's isolation rule: the proxy the browser
+# talks to during a test is byte-identical to the one it talks to in dev, so
+# anything the proxy decides (routing, security headers, TLS) is exercised by
+# the tests rather than bypassed by them.
+#
+# The site address is the loopback address, which is where dev and every e2e
+# scenario are both reached — scenarios differ by published port, not by name.
+# Nothing has to resolve, so the suite needs no outbound DNS, and the one
+# certificate in certs/ covers every scenario.
+#
+# Upstreams are env placeholders with defaults matching the compose service
+# names. The e2e suite overrides them: its scenarios share one Docker network, so
+# each one's backend carries a per-scenario alias. The file is unchanged either
+# way, which is the point.
+{
+	admin off
+	# Certificates are supplied by the tls directive below; Caddy must not try
+	# to reach an ACME endpoint, and must not install an HTTP->HTTPS redirect
+	# vhost (the e2e suite publishes only the HTTPS port).
+	auto_https off
+	# A client connecting to an IP address sends no SNI, so name the certificate
+	# to serve when none arrives.
+	default_sni 127.0.0.1
+	servers {
+		# Following from that: the SNI is empty while the Host header is
+		# 127.0.0.1 and a mapped port. They cannot be required to agree.
+		strict_sni_host insecure_off
+	}
+}
+
+https://127.0.0.1 {
+	tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem
+
+	log {
+		output stderr
+		format console
+		level INFO
+	}
+
+	# Backend API. Same-origin with the frontend on purpose: the Next.js static
+	# bundle calls the relative base "/api" and therefore carries no hostname
+	# at all, which is what lets every scenario share one prebuilt frontend container.
+	handle /api/* {
+		reverse_proxy {$BACKEND_UPSTREAM:backend:8080}
+	}
+
+	# Frontend (static build served by `serve`). Must be last.
+	handle {
+		reverse_proxy {$FRONTEND_UPSTREAM:frontend:3000}
+	}
+
+	header {
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}

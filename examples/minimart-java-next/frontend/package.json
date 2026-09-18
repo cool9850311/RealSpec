@@ -1,0 +1,38 @@
+{
+  "name": "@minimart-java-next/frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --port 3000",
+    "build": "next build && npm run check:bundle",
+    "preview": "npx serve out --listen 3000",
+    "check": "npm run check:types && npm run check:e2e && npm run check:i18n && npm run check:testids",
+    "check:types": "tsc --noEmit -p tsconfig.json",
+    "check:e2e": "tsc --noEmit -p tests/e2e/tsconfig.json",
+    "check:i18n": "node scripts/check-i18n-keys.mjs",
+    "check:testids": "node scripts/check-testids.mjs",
+    "check:bundle": "node scripts/check-static-bundle.mjs",
+    "test:e2e": "bddgen && playwright test",
+    "test:e2e:spec": "bddgen && playwright test --project=spec"
+  },
+  "dependencies": {
+    "next": "^16.3.5",
+    "next-intl": "^4.14.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/dockerode": "^4.0.1",
+    "@types/node": "^24.13.5",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "dockerode": "^5.0.1",
+    "pg": "^8.23.0",
+    "playwright-bdd": "9.2.1",
+    "testcontainers": "12.1.0",
+    "typescript": "^5.9.3",
+    "yaml": "^2.8.1"
+  }
+}
