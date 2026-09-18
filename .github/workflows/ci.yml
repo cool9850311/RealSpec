@@ -23,21 +23,22 @@
 #
 #   shared     packages/**, package.json, package-lock.json, scripts/**, this
 #              file — the validator, the one npm workspace every example
-#              installs through, and the pipeline itself. A change here can
-#              break any example, so it runs all of them, plus the validator's
-#              own tests.
+#              installs through, and the pipeline itself. A change here runs
+#              the validator's own tests and every example's stage 1, which is
+#              where the validator and the parity script actually execute
+#              against each specification. It does not run stages 2 and 3:
+#              those rebuild an example's images and drive its containers, and
+#              only a change inside that example's own directory earns that.
 #   go_nuxt    examples/minimart-go-nuxt/**
-#   java_next  examples/minimart-java-next/** — and examples/minimart-go-nuxt/
-#              spec/**, because java-next's spec is a guarded copy of that one:
-#              the parity check in its stage 1 reads both, so an edit to the
-#              original that is not mirrored must fail java-next, not only
-#              go-nuxt.
+#   java_next  examples/minimart-java-next/**
 #
 # Each example has its own three stages, and each stage needs the previous one.
-# A job whose condition is false is skipped, and so is every job that needs it —
-# that is intended: an untouched example is not rebuilt. GitHub reports a
-# skipped job as successful for branch protection, so required checks on these
-# jobs do not block a pull request that never touched their example.
+# Stage 1 runs when the example's own directory or `shared` changed; stages 2
+# and 3 run only when the example's own directory changed. A job whose condition is false is
+# skipped, and so is every job that needs it — that is intended: an untouched
+# example is not rebuilt. GitHub reports a skipped job as successful for branch
+# protection, so required checks on these jobs do not block a pull request that
+# never touched their example.
 #
 # Stages 2 and 3 both start containers per scenario, so the runner needs a
 # working Docker daemon — ubuntu-latest has one. They are separate, sequential
@@ -94,7 +95,6 @@ jobs:
               - 'examples/minimart-go-nuxt/**'
             java_next:
               - 'examples/minimart-java-next/**'
-              - 'examples/minimart-go-nuxt/spec/**'
 
   validator-tests:
     name: validator tests
@@ -162,7 +162,7 @@ jobs:
     name: go-nuxt · 2 API scenarios
     runs-on: ubuntu-latest
     needs: [changes, go-nuxt-validate]
-    if: needs.changes.outputs.go_nuxt == 'true' || needs.changes.outputs.shared == 'true'
+    if: needs.changes.outputs.go_nuxt == 'true'
     defaults:
       run:
         working-directory: examples/minimart-go-nuxt/backend
@@ -190,7 +190,7 @@ jobs:
     name: go-nuxt · 3 e2e scenarios
     runs-on: ubuntu-latest
     needs: [changes, go-nuxt-api]
-    if: needs.changes.outputs.go_nuxt == 'true' || needs.changes.outputs.shared == 'true'
+    if: needs.changes.outputs.go_nuxt == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -304,7 +304,7 @@ jobs:
     name: java-next · 2 API scenarios
     runs-on: ubuntu-latest
     needs: [changes, java-next-validate]
-    if: needs.changes.outputs.java_next == 'true' || needs.changes.outputs.shared == 'true'
+    if: needs.changes.outputs.java_next == 'true'
     defaults:
       run:
         working-directory: examples/minimart-java-next/backend
@@ -344,7 +344,7 @@ jobs:
     name: java-next · 3 e2e scenarios
     runs-on: ubuntu-latest
     needs: [changes, java-next-api]
-    if: needs.changes.outputs.java_next == 'true' || needs.changes.outputs.shared == 'true'
+    if: needs.changes.outputs.java_next == 'true'
     steps:
       - uses: actions/checkout@v4
 
