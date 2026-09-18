@@ -1,0 +1,26 @@
+{
+  // The e2e suite type-checks on its own, separately from the app: it runs in
+  // Node with Playwright's transpiler, which strips types without checking
+  // them, so `npm run check:e2e` is the only thing that would ever notice a
+  // type error in here.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    // Bundler resolution, because Playwright's own transpiler is what loads
+    // these files and it resolves extensionless relative imports.
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitOverride": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"]
+  },
+  "include": ["**/*.ts", "../../playwright.config.ts"]
+}

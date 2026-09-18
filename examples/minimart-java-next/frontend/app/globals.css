@@ -1,0 +1,217 @@
+/* minimart — the whole stylesheet.
+ *
+ * Small on purpose: this example exists to demonstrate a specification and its
+ * tests, so the CSS does what is needed to make the pages legible and usable
+ * (focus rings, hit targets, readable tables) and nothing beyond that.
+ */
+
+:root {
+  --ink: #1b1d21;
+  --ink-muted: #5b6270;
+  --paper: #f6f7f9;
+  --surface: #ffffff;
+  --line: #d9dde4;
+  --accent: #1f5ae0;
+  --accent-ink: #ffffff;
+  --danger: #a3122b;
+  --danger-bg: #fdeef1;
+  --radius: 6px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans TC", sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app__header {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.875rem 1.5rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.app__brand {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.app__nav {
+  display: flex;
+  gap: 1rem;
+}
+
+.app__nav-link {
+  color: var(--ink);
+  text-decoration: none;
+  padding: 0.25rem 0.125rem;
+  border-bottom: 2px solid transparent;
+}
+
+.app__nav-link:hover {
+  border-bottom-color: var(--line);
+}
+
+.app__nav-link[aria-current="page"] {
+  border-bottom-color: var(--accent);
+}
+
+.app__balance {
+  margin: 0 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.app__balance-label {
+  color: var(--ink-muted);
+  font-size: 0.875rem;
+}
+
+.app__balance-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.app__main {
+  flex: 1;
+  width: 100%;
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+}
+
+.app__main--centred {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 26rem;
+}
+
+.page__title,
+.card__title {
+  margin: 0 0 1.25rem;
+  font-size: 1.5rem;
+}
+
+.page__status {
+  color: var(--ink-muted);
+}
+
+.card {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.75rem;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.form__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.form__label {
+  font-size: 0.875rem;
+  color: var(--ink-muted);
+}
+
+.form__input {
+  font: inherit;
+  color: inherit;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.form__input:focus-visible,
+.button:focus-visible,
+.app__nav-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.button {
+  font: inherit;
+  cursor: pointer;
+  padding: 0.5rem 1rem;
+  min-height: 2.5rem;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+}
+
+.button--primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.button--primary:hover {
+  filter: brightness(1.08);
+}
+
+.alert {
+  margin: 0 0 1rem;
+  padding: 0.625rem 0.875rem;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: 0.625rem 0.875rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.table thead th {
+  font-size: 0.8125rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-muted);
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table__number {
+  font-variant-numeric: tabular-nums;
+}

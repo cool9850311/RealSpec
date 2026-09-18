@@ -1,0 +1,21 @@
+# Maven build output.
+target/
+
+# Fetched by ./mvnw on first use (distributionType=source): the wrapper jar is
+# downloaded, and its downloader compiled, rather than committed as binaries.
+.mvn/wrapper/maven-wrapper.jar
+.mvn/wrapper/MavenWrapperDownloader.class
+
+# Project files an IDE writes the moment it imports this pom: Eclipse JDT —
+# which is also what the VS Code Java extension runs underneath, so merely
+# opening the folder produces these — and IntelliJ IDEA. They describe one
+# machine's workspace, and the pom is the only build definition.
+.classpath
+.project
+.settings/
+.factorypath
+.apt_generated/
+.apt_generated_tests/
+bin/
+.idea/
+*.iml

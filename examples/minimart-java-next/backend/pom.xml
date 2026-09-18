@@ -1,0 +1,330 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  minimart backend: Java 25 + Spring Boot 4.1 + Spring Security.
+
+  The service is a behaviour-exact port of examples/minimart-go-nuxt/backend.
+  spec/ is the contract; this file only decides how the code that honours it is
+  built and checked.
+
+  Every version below is either managed by the Spring Boot parent (and therefore
+  moves with it as one tested set) or pinned in <properties> with the reason.
+
+  Build phases, in the order CI runs them (`./mvnw -B verify`):
+    compile        javac release 25, -Xlint:all -Werror
+    test           Surefire: unit tests only (no Docker)
+    package        the executable jar the Dockerfile ships
+    integration-test / verify
+                   Failsafe: **/*IT.java, i.e. the Cucumber API suite
+                   (src/test/java/minimart/bdd/RunApiFeaturesIT.java), which
+                   needs Docker
+    verify         Spotless check (google-java-format)
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>4.1.1</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>minimart</groupId>
+  <artifactId>minimart</artifactId>
+  <version>1.0.0</version>
+  <name>minimart</name>
+  <description>The RealSpec reference application: login, product list, points redemption.</description>
+
+  <properties>
+    <java.version>25</java.version>
+    <maven.compiler.release>25</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+    <!-- Not managed by the Boot parent. Latest stable on Maven Central when
+         this example was written; bump them together with a full `verify`. -->
+    <cucumber.version>7.34.8</cucumber.version>
+    <spotless-maven-plugin.version>3.10.2</spotless-maven-plugin.version>
+    <google-java-format.version>1.36.1</google-java-format.version>
+
+    <!-- Managed by the Boot parent (4.1.1 manages 2.0.5), restated here so the
+         Testcontainers BOM import below and the parent cannot disagree. -->
+    <testcontainers.version>2.0.5</testcontainers.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>io.cucumber</groupId>
+        <artifactId>cucumber-bom</artifactId>
+        <version>${cucumber.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.testcontainers</groupId>
+        <artifactId>testcontainers-bom</artifactId>
+        <version>${testcontainers.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <!-- Spring MVC on Tomcat, with Jackson 3 (tools.jackson.*). Boot 4 names
+         this starter -webmvc; the old spring-boot-starter-web is a deprecated
+         alias for it. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-webmvc</artifactId>
+    </dependency>
+
+    <!-- Spring Security, and its JWT resource server over Nimbus. The token is
+         read from a cookie rather than an Authorization header, which is a
+         BearerTokenResolver away from the stock resource server. (Boot 4 names
+         this starter -security-oauth2-resource-server; the old
+         spring-boot-starter-oauth2-resource-server is a deprecated alias.) -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId>
+    </dependency>
+
+    <!-- JdbcClient, TransactionTemplate and HikariCP. The DataSource itself is
+         built by hand from AppConfig (see ApplicationWiring), so Boot's
+         DataSource auto-configuration backs off. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-jdbc</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- Flyway as a library only. In Boot 4 the Flyway auto-configuration lives
+         in its own module (spring-boot-flyway, pulled in by
+         spring-boot-starter-flyway), which is deliberately NOT on the classpath:
+         migrations run when SCHEMA_AUTO_MIGRATE says so, through
+         SchemaMigrator, and never as a side effect of the context starting. -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+    </dependency>
+
+    <!-- ─────────────────────────── tests ─────────────────────────── -->
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- @WebMvcTest and MockMvc auto-configuration (a module of its own in
+         Boot 4). -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-webmvc-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- spring-security-test plus Boot's glue that applies the security filter
+         chain to an auto-configured MockMvc. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- The Cucumber-JVM API suite (src/test/java/minimart/bdd). -->
+    <dependency>
+      <groupId>io.cucumber</groupId>
+      <artifactId>cucumber-java</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.cucumber</groupId>
+      <artifactId>cucumber-junit-platform-engine</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.cucumber</groupId>
+      <artifactId>cucumber-picocontainer</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.platform</groupId>
+      <artifactId>junit-platform-suite</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Reads spec/bdd/format.yml for the step-registry parity test. -->
+    <dependency>
+      <groupId>org.yaml</groupId>
+      <artifactId>snakeyaml</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <!-- A fixed name, so the Dockerfile does not have to know the version. -->
+    <finalName>minimart</finalName>
+
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <release>25</release>
+          <!-- Parameter names are kept for Spring's reflection (the parent sets
+               this too; it is restated because -Werror makes the flag set part
+               of the build's contract). -->
+          <parameters>true</parameters>
+          <compilerArgs>
+            <!-- Every lint category, and a warning is a failed build. The one
+                 exclusion is "processing": javac emits it whenever annotation
+                 processing runs and no processor claims an annotation, which
+                 says nothing about this code. -->
+            <arg>-Xlint:all,-processing</arg>
+            <arg>-Werror</arg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <!-- Unit tests only. The *IT classes are Failsafe's, and the Cucumber
+               engine is kept out of this phase entirely so that nothing that
+               needs Docker can be discovered by `./mvnw test`. -->
+          <excludes>
+            <exclude>**/*IT.java</exclude>
+          </excludes>
+          <excludeJUnit5Engines>
+            <excludeJUnit5Engine>cucumber</excludeJUnit5Engine>
+          </excludeJUnit5Engines>
+          <trimStackTrace>false</trimStackTrace>
+          <!-- Mockito installs its inline mock maker as a Java agent; loading an
+               agent into a running JVM is warned about since JDK 21 and slated
+               to be refused, so it is enabled explicitly rather than left to a
+               warning. -->
+          <argLine>-XX:+EnableDynamicAgentLoading</argLine>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <configuration>
+          <includes>
+            <include>**/*IT.java</include>
+          </includes>
+          <trimStackTrace>false</trimStackTrace>
+          <!-- No systemPropertyVariables on purpose: the suite reads its knobs
+               (CUCUMBER_CONCURRENCY, Docker host settings) from the environment,
+               which the forked JVM inherits, and cucumber.* settings such as
+               -Dcucumber.filter.tags=@orders from Maven user properties, which
+               Failsafe copies into the fork's system properties as given. -->
+          <argLine>-XX:+EnableDynamicAgentLoading</argLine>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+        <version>${spotless-maven-plugin.version}</version>
+        <configuration>
+          <java>
+            <googleJavaFormat>
+              <version>${google-java-format.version}</version>
+              <style>GOOGLE</style>
+            </googleJavaFormat>
+            <removeUnusedImports/>
+          </java>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>check</goal>
+            </goals>
+            <phase>verify</phase>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>repackage</id>
+            <goals>
+              <goal>repackage</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <!-- CUCUMBER_TAGS="@orders and not @race" ./mvnw verify — the environment
+         spelling of -Dcucumber.filter.tags (the analogue of go-nuxt's
+         GODOG_TAGS). A profile rather than an unconditional
+         systemPropertyVariables entry because an unset variable would otherwise
+         reach the suite as the literal text ${env.CUCUMBER_TAGS}. -->
+    <profile>
+      <id>cucumber-tags</id>
+      <activation>
+        <property>
+          <name>env.CUCUMBER_TAGS</name>
+        </property>
+      </activation>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <configuration>
+              <systemPropertyVariables>
+                <cucumber.filter.tags>${env.CUCUMBER_TAGS}</cucumber.filter.tags>
+              </systemPropertyVariables>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

@@ -1,0 +1,13 @@
+node_modules/
+# `next build` output: the build cache and the static export.
+.next/
+out/
+# Written by `next build`/`next dev` with a path that depends on which of the
+# two ran last; create-next-app ignores it for that reason.
+next-env.d.ts
+.features-gen/
+# Next loads these automatically if they exist. Nothing in this app reads an
+# environment variable — the API base is the literal relative "/api" — so one
+# of these can only be a developer's local experiment, and one holding a secret
+# must never reach the repository.
+.env*.local
