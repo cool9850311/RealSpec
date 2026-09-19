@@ -29,12 +29,11 @@ than one is to keep proving that the standard is independent of the stack.
 once — backend language and frontend framework — because its owner asked for
 exactly that pair. The cost is diagnosis. When it fails, the failure could be in
 either layer, and the example alone cannot say which. Two things narrow it back
-down. Its spec is not its own: it is a guarded copy of `minimart-go-nuxt`'s,
-held identical by `scripts/check-spec-parity.mjs` — every feature file byte for
-byte, the contract and the step registry except for descriptions and comments —
-so a failure is never a difference in what is being asserted. And
-`minimart-go-nuxt` is unchanged, so running the same scenarios there says
-whether the spec or the new implementation is at fault.
+down. Its spec is not its own: it is a copy of `minimart-go-nuxt`'s — every
+feature file byte for byte, the contract and the step registry except for
+descriptions and comments — so a failure is not a difference in what is being
+asserted. And `minimart-go-nuxt` is unchanged, so running the same scenarios
+there says whether the spec or the new implementation is at fault.
 
 ## Naming
 

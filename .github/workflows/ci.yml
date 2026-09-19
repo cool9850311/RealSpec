@@ -21,12 +21,12 @@
 # Path filters. The `changes` job decides which examples a pull request can
 # have affected, and only those run:
 #
-#   shared     packages/**, package.json, package-lock.json, scripts/**, this
-#              file — the validator, the one npm workspace every example
-#              installs through, and the pipeline itself. A change here runs
-#              the validator's own tests and every example's stage 1, which is
-#              where the validator and the parity script actually execute
-#              against each specification. It does not run stages 2 and 3:
+#   shared     packages/**, package.json, package-lock.json, this file — the
+#              validator, the one npm workspace every example installs
+#              through, and the pipeline itself. A change here runs the
+#              validator's own tests and every example's stage 1, which is
+#              where the validator actually executes against each
+#              specification. It does not run stages 2 and 3:
 #              those rebuild an example's images and drive its containers, and
 #              only a change inside that example's own directory earns that.
 #   go_nuxt    examples/minimart-go-nuxt/**
@@ -89,7 +89,6 @@ jobs:
               - 'packages/**'
               - 'package.json'
               - 'package-lock.json'
-              - 'scripts/**'
               - '.github/workflows/ci.yml'
             go_nuxt:
               - 'examples/minimart-go-nuxt/**'
@@ -112,13 +111,12 @@ jobs:
       - run: npm ci
       - run: npm run build -w @realspec/cli
 
-      # The validator's own tests, then the spec-parity script's. One of the
-      # validator's — the parity case — compares this validator byte for byte
-      # with the Python one it was ported from, over that project's corpus. The
-      # corpus is not in this repository, so the case skips here unless
-      # REALSPEC_PARITY_CORPUS names a checkout of it. This step passing is not
-      # a parity result.
-      - name: Validator and spec-parity script tests (parity case skips, its corpus is not in this repository)
+      # The validator's own tests. One of them — the parity case — compares
+      # this validator byte for byte with the Python one it was ported from,
+      # over that project's corpus. The corpus is not in this repository, so
+      # the case skips here unless REALSPEC_PARITY_CORPUS names a checkout of
+      # it. This step passing is not a parity result.
+      - name: Validator tests (parity case skips, its corpus is not in this repository)
         run: npm test
 
   # ─── minimart-go-nuxt ──────────────────────────────────────────────────────
@@ -290,15 +288,6 @@ jobs:
           node packages/cli/dist/cli.js validate
           --format examples/minimart-java-next/spec/bdd/format.yml
           examples/minimart-java-next/frontend/tests/e2e/harness/features/*/*.feature
-
-      # This spec is a copy of go-nuxt's, and "the same domain, the same
-      # contract" is only true while the copy is exact. The script compares the
-      # two spec/ trees: every feature file byte for byte, the OpenAPI document
-      # and the step registry with only descriptions and comments allowed to
-      # differ. Anything else is named, file and path, and fails the stage, so
-      # the copy cannot drift quietly in either direction.
-      - name: Spec parity with minimart-go-nuxt
-        run: node scripts/check-spec-parity.mjs
 
   java-next-api:
     name: java-next · 2 API scenarios

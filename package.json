@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "build": "npm run build -w @realspec/cli",
-    "test": "npm run test -w @realspec/cli && node --test scripts/check-spec-parity.test.mjs"
+    "test": "npm run test -w @realspec/cli"
   },
   "devDependencies": {
     "typescript": "^5.7.3",

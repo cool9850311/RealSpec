@@ -171,8 +171,8 @@ next:
 
 Each example has its own three stages. The pipeline runs on pull requests only,
 and only for the examples whose files the pull request changed. A change to
-something the examples share — the validator, the root workspace, the scripts,
-the pipeline itself — runs the validator's own tests and every example's
+something the examples share — the validator, the root workspace, the pipeline
+itself — runs the validator's own tests and every example's
 validation stage, but not their API or e2e stages: those run only when the
 example's own directory changed. An untouched example is not rebuilt to prove it
 still works.
