@@ -8,9 +8,9 @@ browser front end described with the same step grammar as the API.
 This example has the same domain, API contract, step registry and feature files
 as `examples/minimart-go-nuxt`; only the implementation differs — a Java 25 +
 Spring Boot 4.1 + Spring Security service, and a Next.js 16 static export. The
-spec is a copy, and `scripts/check-spec-parity.mjs` (repo root) fails CI if the
-two copies drift in anything but prose. See *Deliberate differences from
-minimart-go-nuxt* at the end of this file.
+spec is a copy of go-nuxt's that differs only in prose naming the
+implementation. See *Deliberate differences from minimart-go-nuxt* at the end
+of this file.
 
 This file carries **architecture and decisions**. A fact that is executable
 lives where it executes and is pointed at from here, never copied: a copy has
@@ -358,13 +358,11 @@ proved portable, not the particular containers.
 
 ### CI
 
-`.github/workflows/ci.yml` — triggered only by `pull_request`, and each example
-runs only when its own directory (or shared tooling) changed, selected by
-per-example path filters; this example's jobs also run when
-`examples/minimart-go-nuxt/spec/**` changes, since the spec is shared by
-contract. Three blocking stages in order: `realspec validate` plus
-`scripts/check-spec-parity.mjs`, then `./mvnw -B verify` (Spotless, `-Werror`,
-unit tests, then the Cucumber-JVM API suite), then `bddgen && playwright test`.
+`.github/workflows/ci.yml` — triggered only by `pull_request`. All three stages
+run when this example's own directory changed; a change to shared tooling runs
+only the first. Three blocking stages in order: `realspec validate`, then
+`./mvnw -B verify` (Spotless, `-Werror`, unit tests, then the Cucumber-JVM API
+suite), then `bddgen && playwright test`.
 Validation is first because it is the only stage that costs nothing. Neither
 runner's concurrency is set there; both halve the machine's CPU count.
 
