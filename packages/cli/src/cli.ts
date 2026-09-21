@@ -233,7 +233,10 @@ export function main(argv: readonly string[] = process.argv.slice(2)): void {
   process.exitCode = result.exitCode;
 }
 
+// Node resolves symlinks before loading an ES module, so import.meta.url is the
+// real path while argv[1] may be a symlink (node_modules/.bin/realspec, npx).
+// Compare real paths, or a bin launch silently does nothing and exits 0.
 const entry = process.argv[1];
-if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
+if (entry !== undefined && import.meta.url === pathToFileURL(fs.realpathSync(entry)).href) {
   main();
 }
