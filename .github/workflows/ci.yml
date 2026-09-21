@@ -40,6 +40,13 @@
 # protection, so required checks on these jobs do not block a pull request that
 # never touched their example.
 #
+# Each job needs only the stage before it, never `changes` directly: stage 1
+# passes its example's flag on as an output, stage 2 reads it from there, and
+# stage 3 has no condition of its own — it runs exactly when stage 2 passed.
+# Needing `changes` from every stage would behave the same, but GitHub's graph
+# routes those column-skipping edges through the neighbouring example's jobs,
+# which makes the two chains look connected when they are not.
+#
 # Stages 2 and 3 both start containers per scenario, so the runner needs a
 # working Docker daemon — ubuntu-latest has one. They are separate, sequential
 # jobs rather than parallel ones: both saturate the runner's CPU with container
@@ -126,6 +133,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.go_nuxt == 'true' || needs.changes.outputs.shared == 'true'
+    # Stage 2 reads this instead of needing `changes` itself (see the header).
+    outputs:
+      example_changed: ${{ needs.changes.outputs.go_nuxt }}
     steps:
       - uses: actions/checkout@v4
 
@@ -159,8 +169,8 @@ jobs:
   go-nuxt-api:
     name: go-nuxt · 2 API scenarios
     runs-on: ubuntu-latest
-    needs: [changes, go-nuxt-validate]
-    if: needs.changes.outputs.go_nuxt == 'true'
+    needs: go-nuxt-validate
+    if: needs.go-nuxt-validate.outputs.example_changed == 'true'
     defaults:
       run:
         working-directory: examples/minimart-go-nuxt/backend
@@ -187,8 +197,7 @@ jobs:
   go-nuxt-e2e:
     name: go-nuxt · 3 e2e scenarios
     runs-on: ubuntu-latest
-    needs: [changes, go-nuxt-api]
-    if: needs.changes.outputs.go_nuxt == 'true'
+    needs: go-nuxt-api
     steps:
       - uses: actions/checkout@v4
 
@@ -259,6 +268,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.java_next == 'true' || needs.changes.outputs.shared == 'true'
+    # Stage 2 reads this instead of needing `changes` itself (see the header).
+    outputs:
+      example_changed: ${{ needs.changes.outputs.java_next }}
     steps:
       - uses: actions/checkout@v4
 
@@ -292,8 +304,8 @@ jobs:
   java-next-api:
     name: java-next · 2 API scenarios
     runs-on: ubuntu-latest
-    needs: [changes, java-next-validate]
-    if: needs.changes.outputs.java_next == 'true'
+    needs: java-next-validate
+    if: needs.java-next-validate.outputs.example_changed == 'true'
     defaults:
       run:
         working-directory: examples/minimart-java-next/backend
@@ -332,8 +344,7 @@ jobs:
   java-next-e2e:
     name: java-next · 3 e2e scenarios
     runs-on: ubuntu-latest
-    needs: [changes, java-next-api]
-    if: needs.changes.outputs.java_next == 'true'
+    needs: java-next-api
     steps:
       - uses: actions/checkout@v4
 
