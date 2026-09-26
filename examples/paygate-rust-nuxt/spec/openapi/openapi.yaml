@@ -1,0 +1,946 @@
+openapi: "3.1.0"
+
+info:
+  title: paygate API
+  version: "1.0.0"
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  description: |
+    paygate is a **payment service**: merchants integrate with it, and it
+    integrates ECPay and NewebPay on their behalf as a **platform
+    merchant** (ECPay's own term is contracted partner platform merchant). Each merchant keeps its own account at the
+    provider; paygate holds the platform credentials that sign for all of them,
+    and the money is settled to the merchant's own account, never to paygate's.
+    This file is the surface merchants and customers see. What paygate sends the
+    providers is in `payment-provider.yaml`; what it sends merchants is in
+    `demo-merchant.yaml`.
+
+    ## The steps, and where each credential lives
+    | Step | Who calls | Credential |
+    |------|-----------|------------|
+    | `POST /payments` — create the order AND get the provider's signed form | merchant server | `Authorization: Bearer sk_test_…` |
+    | `POST /webhooks/{provider}` — the outcome | the PROVIDER | the provider's signature in the body |
+    | the callback to `notify_url` | paygate → merchant | `CheckMacValue` in the body, which the merchant verifies |
+
+    **There is no endpoint here that a customer's browser calls.** The merchant's
+    own page renders the form this API returns and submits it to the provider, so
+    the customer talks to the merchant and to the provider and never to paygate.
+    One call for a whole payment, and one is the minimum rather than a
+    convenience: ECPay's WooCommerce plugin makes none at all, because that
+    merchant holds its own `HashKey`. Under a platform the key is paygate's, and
+    signing is the only thing a merchant cannot do for itself.
+
+    ## No card data, anywhere
+    There is no endpoint here that accepts a card number, because the customer
+    types it on the PROVIDER's cashier, at the provider's origin. paygate learns a
+    brand and four digits from the provider's callback and nothing else. An order
+    stays `pending` however many forms have been handed out for it; what settles
+    it is the provider's back-channel callback and nothing a browser did.
+
+    ## Two kinds of duplicate
+    - `merchant_trade_no` is the merchant's own order number, unique per
+      merchant (ECPay's `MerchantTradeNo`). Asking again for an UNPAID order with
+      the same parameters is not reuse — it is the merchant rendering its payment
+      page again, and it gets a new provider order number. Changing the
+      parameters, or asking once it is paid, is `422 MERCHANT_TRADE_NO_TAKEN`.
+    - `Idempotency-Key` (IETF draft) is required on `POST /payments` and
+      `POST /payments/{id}/refunds` and identifies a REQUEST, so that a retry
+      after a lost response is replayed rather than refused:
+
+    | Situation | Answer |
+    |-----------|--------|
+    | Header absent | `400 IDEMPOTENCY_KEY_MISSING` |
+    | Header present but empty, blank, or longer than 255 | `400 IDEMPOTENCY_KEY_INVALID` — present and unusable is a different mistake from forgotten |
+    | First use | processed; the status and body are stored for 24 hours |
+    | Same key, same request, answered | the stored answer, with `Idempotent-Replayed: true` |
+    | Same key, same request, running | `409 IDEMPOTENCY_KEY_IN_USE` |
+    | Same key, different request | `422 IDEMPOTENCY_KEY_REUSED` |
+
+    Answers produced before processing starts — authentication, rate limiting,
+    validation — are not stored, so a corrected request may reuse its key.
+
+    ## Consistency
+    Everything a merchant reads here is strongly consistent: it is read from
+    PostgreSQL, and an order is readable the instant it is created. The one
+    exception is the daily report, which reads a projection built
+    asynchronously and says so at that endpoint.
+
+    ## Money
+    Amounts are integers in the currency's minor unit, 1 to 99 999 999. Each
+    merchant settles in exactly one ISO 4217 currency.
+
+    ## Rate limits
+    The MERCHANT API is limited per merchant by a token bucket of
+    `rate_limit_per_minute`; a refused request is `429` with `Retry-After` and
+    is refused before its idempotency key is recorded. The provider's callbacks
+    are never limited, because refusing one only makes it arrive again, later,
+    with the payment still unsettled.
+
+    ## Errors and common headers
+    Every error body is a flat object with a stable `error` code plus the
+    fields that code documents, except the provider callbacks, which answer in
+    the providers' own plain-text convention. Every response carries
+    `X-Request-Id`, `Cache-Control: no-store` and `X-Content-Type-Options:
+    nosniff`.
+
+servers:
+  - url: "https://{host}/api/v1"
+    variables:
+      host: { default: YOUR_DOMAIN }
+  - url: "http://{host}/api/v1"
+    variables:
+      host: { default: localhost:8080 }
+
+tags:
+  - name: Orders
+    description: Merchant API — create an order and its provider form, read it, refund it
+  - name: Provider
+    description: Callbacks from the payment provider
+  - name: Dashboard
+    description: Session, API keys and reports for a merchant's staff
+  - name: Health
+    description: Liveness and readiness
+
+paths:
+
+  /payments:
+    post:
+      operationId: createOrder
+      summary: Create an order for a customer to pay
+      tags: [Orders]
+      security: [ { MerchantApiKey: [] } ]
+      description: |
+        The merchant's server creates the order and gets back somewhere to send
+        the customer. No card data is involved and no provider is called: which
+        provider will take the payment is decided later, when the customer
+        actually goes to check out.
+
+        Order of checks, each before the next: API key (`401`), rate limit
+        (`429`), `Idempotency-Key` presence (`400`), idempotency lookup (replay
+        / `409` / `422`), body shape (`400 INVALID_REQUEST` — an unknown field,
+        a wrong type, or anything that looks like card data), field rules
+        (`422 VALIDATION_FAILED`), currency (`422 CURRENCY_NOT_SUPPORTED`),
+        trade number (`422 MERCHANT_TRADE_NO_TAKEN`).
+
+        The order, its `PaymentCreated` audit row and the idempotency record are
+        committed together with the **attempt** the form belongs to and its
+        `PaymentAttemptStarted` row, and then the form is signed.
+
+        Calling it again for an unpaid order with the same parameters gets the
+        same order and a NEW `provider_trade_no`, because ECPay refuses one it has
+        seen before. A retry carrying the same `Idempotency-Key` is replayed
+        instead, form and all, and opens nothing.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateOrderRequest" }
+      responses:
+        "201":
+          description: Created, awaiting payment
+          headers:
+            Idempotent-Replayed: { $ref: "#/components/headers/IdempotentReplayed" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedOrder" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "409": { $ref: "#/components/responses/IdempotencyKeyInUse" }
+        "422":
+          description: >
+            `VALIDATION_FAILED` (with `field`), `CURRENCY_NOT_SUPPORTED`,
+            `MERCHANT_TRADE_NO_TAKEN`, or `IDEMPOTENCY_KEY_REUSED`.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ValidationError"
+                  - $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+    get:
+      operationId: findOrderByTradeNo
+      summary: Find one of the caller's orders by the merchant's own number
+      tags: [Orders]
+      security: [ { MerchantApiKey: [] } ]
+      parameters:
+        - name: merchant_trade_no
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The order
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/PaymentNotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /payments/{paymentId}:
+    get:
+      operationId: getOrder
+      summary: Read one of the caller's orders
+      tags: [Orders]
+      security: [ { MerchantApiKey: [] } ]
+      description: |
+        Read from PostgreSQL, so it is never stale: an order is readable the
+        instant it is created, and stays readable while the reporting pipeline
+        or the notifier is down. This is also the merchant's recovery path when
+        a callback was never acknowledged.
+
+        Another merchant's order, an unknown id and an id that is not a UUID are
+        the same `404`. No form is returned here: a form is a live order number
+        at a provider, and minting one is a write.
+      parameters:
+        - $ref: "#/components/parameters/PaymentId"
+      responses:
+        "200":
+          description: The order
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/PaymentNotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /payments/{paymentId}/refunds:
+    post:
+      operationId: createRefund
+      summary: Refund a paid order, in full or in part
+      tags: [Orders]
+      security: [ { MerchantApiKey: [] } ]
+      description: |
+        The equivalent of ECPay's `DoAction` with `Action=R`, taking a
+        `TotalAmount`. May be called repeatedly until the refunds reach the
+        amount charged; the payment's status becomes `refunded` when they do.
+
+        The payment's row is locked, its refunded total re-read under that
+        lock, and the refund, the new total, the audit row and a notification
+        to the merchant are committed together. A `CHECK` constraint repeats the
+        arithmetic, so a path that forgot the lock fails rather than
+        over-refunding.
+
+        Refunds at the provider are synchronous and final: a refund is
+        `succeeded` or it does not exist.
+      parameters:
+        - $ref: "#/components/parameters/PaymentId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateRefundRequest" }
+      responses:
+        "201":
+          description: Refunded
+          headers:
+            Idempotent-Replayed: { $ref: "#/components/headers/IdempotentReplayed" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Refund" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/PaymentNotFound" }
+        "409": { $ref: "#/components/responses/IdempotencyKeyInUse" }
+        "422":
+          description: >
+            `VALIDATION_FAILED` (`field: amount`), `PAYMENT_NOT_REFUNDABLE`
+            (the order was never paid), `REFUND_EXCEEDS_REMAINING` (with
+            `remaining`), or `IDEMPOTENCY_KEY_REUSED`.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ValidationError"
+                  - $ref: "#/components/schemas/RefundExceedsRemaining"
+                  - $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502":
+          description: The provider refused service; nothing was refunded or recorded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /webhooks/ecpay:
+    post:
+      operationId: receiveEcpayCallback
+      summary: Receive an outcome from ECPay (the back channel)
+      tags: [Provider]
+      security: [ { ProviderCallbackSignature: [] } ]
+      description: |
+        **The only thing that settles an order.** Not to be confused with the
+        callback paygate sends to the MERCHANT (demo-merchant.yaml); this is the
+        same protocol one level up, with paygate in the merchant's seat.
+
+        `application/x-www-form-urlencoded`, ECPay's parameter names, and the
+        answer is ECPay's convention: the body `1|OK` and nothing else means
+        accepted. **paygate writes it only after the transaction commits.**
+        Anything else — a bad signature, an unknown trade number, a database
+        that would not commit — leaves the provider to send it again, which is
+        the recovery path for every failure on this endpoint.
+
+        In one transaction: `CheckMacValue` is recomputed and compared in
+        constant time; `(provider_code, event_id)` is inserted into
+        `provider_events`, whose primary key makes a redelivery a no-op that is
+        still answered `1|OK`; the order is locked and updated `WHERE status =
+        'pending'`, so the first final state wins; the attempt is closed;
+        the audit row and the merchant's notification are written with it.
+
+        `RtnCode` is an **open set**. `1` is paid; `10100058` and `10200163` are
+        failures; `10300066` is ECPay's "payment result pending confirmation, do
+        not ship"; ECPay adds more over
+        time. A code this gateway does not know is recorded with
+        `outcome = 'unknown_code'`, acknowledged, and acted on in no way — the
+        only safe behaviour for a code whose meaning arrives later than the code.
+
+        Two more shapes that look like payments and are not. `SimulatePaid=1`,
+        which ECPay's back office sends when somebody presses the "confirm test
+        payment" button, is
+        recorded and acknowledged and settles nothing. A `TradeAmt` that is not
+        the order's amount is `outcome = 'amount_mismatch'` and is **refused**,
+        so that it is sent again rather than quietly dropped: either the order
+        was tampered with or two systems disagree about the price, and settling
+        on either reading is worse than settling nothing.
+
+        A second successful callback for a DIFFERENT attempt of the same order is
+        not a contradiction but a duplicate payment: `outcome = 'duplicate'`,
+        acknowledged, the order left as it is, and the money given back
+        (`duplicate_payment.feature`).
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/EcpayCallback" }
+      responses:
+        "200":
+          description: Committed, or a duplicate of something already committed
+          content:
+            text/plain:
+              schema: { type: string, const: "1|OK" }
+        "400":
+          description: >
+            Refused, and therefore resent by the provider: the signature did
+            not verify, or `MerchantTradeNo` matches no attempt of ours.
+          content:
+            text/plain:
+              schema: { type: string, examples: ["0|CheckMacValue Error", "0|UnknownOrder"] }
+        "500":
+          description: >
+            Nothing was committed — the provider must send it again. Answering
+            `1|OK` here would lose the payment silently, which is why the
+            acknowledgement is written after the commit and not before.
+          content:
+            text/plain:
+              schema: { type: string, const: "0|Error" }
+
+  /webhooks/newebpay:
+    post:
+      operationId: receiveNewebpayCallback
+      summary: Receive an outcome from NewebPay (the back channel)
+      tags: [Provider]
+      security: [ { ProviderCallbackSignature: [] } ]
+      description: |
+        The same endpoint one provider along, and the reason the adapter is an
+        interface rather than an if-statement: the parameters arrive
+        AES-256-CBC encrypted in `TradeInfo` with `TradeSha` over the
+        ciphertext, so verification is decrypt-then-compare rather than
+        sort-then-hash. Everything after that — deduplicate, lock, settle once,
+        write the notification, answer `1|OK` after the commit — is byte for
+        byte the code that serves ECPay.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/NewebpayCallback" }
+      responses:
+        "200":
+          description: Committed, or a duplicate of something already committed
+          content:
+            text/plain:
+              schema: { type: string, const: "1|OK" }
+        "400":
+          description: Refused, and therefore resent by the provider
+          content:
+            text/plain:
+              schema: { type: string }
+        "500":
+          description: Nothing was committed — the provider must send it again
+          content:
+            text/plain:
+              schema: { type: string, const: "0|Error" }
+
+  /dashboard/login:
+    post:
+      operationId: dashboardLogin
+      summary: Open a dashboard session
+      tags: [Dashboard]
+      security: []
+      description: |
+        bcrypt against `dashboard_users.password_hash`; an unknown email and a
+        wrong password are the same `401 INVALID_CREDENTIALS`. A random 256-bit
+        token is stored in Redis under its SHA-256 for `SESSION_TTL_SECONDS` and
+        set as the HttpOnly `session` cookie, with a readable `session_hint=1`
+        beside it that grants nothing. With Redis unavailable no session can
+        exist: `503 SESSION_STORE_UNAVAILABLE`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Signed in
+          headers:
+            Set-Cookie:
+              description: "session=<token>; Path=/; HttpOnly; SameSite=Lax[; Secure] and session_hint=1"
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardUser" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: Unknown email or wrong password
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: The session store is unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /dashboard/logout:
+    post:
+      operationId: dashboardLogout
+      summary: End the caller's session everywhere
+      tags: [Dashboard]
+      security: [ { DashboardSession: [] } ]
+      responses:
+        "204": { description: Signed out; both cookies expired }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /dashboard/me:
+    get:
+      operationId: dashboardMe
+      summary: The signed-in user and their merchant
+      tags: [Dashboard]
+      security: [ { DashboardSession: [] } ]
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardUser" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /dashboard/api-keys:
+    post:
+      operationId: createApiKey
+      summary: Create a secret API key for the caller's merchant
+      tags: [Dashboard]
+      security: [ { DashboardSession: [] } ]
+      description: >
+        Generates `sk_test_<merchant slug>_<32 random characters>`, stores its
+        SHA-256 and prefix, and returns the raw key exactly once.
+      responses:
+        "201":
+          description: The new key — the only time its raw value is shown
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedApiKey" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /dashboard/api-keys/{keyId}:
+    delete:
+      operationId: revokeApiKey
+      summary: Revoke one of the caller's merchant's keys
+      tags: [Dashboard]
+      security: [ { DashboardSession: [] } ]
+      description: >
+        Sets `revoked_at` and deletes the key's Redis cache entry before
+        answering, so the next request with it is `401` on every replica. A key
+        of another merchant is `404`.
+      parameters:
+        - name: keyId
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "204": { description: Revoked }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404":
+          description: No such key for this merchant
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /dashboard/reports/daily:
+    get:
+      operationId: getDailyReport
+      summary: Daily activity of the caller's merchant
+      tags: [Dashboard]
+      security: [ { DashboardSession: [] } ]
+      description: |
+        The one EVENTUALLY consistent endpoint in this API: it reads the
+        ClickHouse projection, so an outcome appears once the pipeline has
+        carried its audit row (objective: under 30 s, spec.md NFR-OLAP-1). The
+        projection can be rebuilt from the audit table and answers the same
+        figures afterwards.
+
+        Days are calendar days in the merchant's timezone; `from` and `to` are
+        inclusive and default to the last 7 days. Every day in the range is
+        present, ascending, including days with no activity.
+
+        Figures are over ATTEMPTS, which is what an authorisation rate means:
+        - `succeeded_count`, `gross_amount` — `PaymentSucceeded`
+        - `failed_count` — `PaymentAttemptFailed`
+        - `refunded_count`, `refunded_amount` — `PaymentRefunded`, dated by the
+          refund
+        - `net_amount` = gross − refunded, and may be negative
+        - `success_rate_bps` = ⌊ succeeded × 10000 ÷ (succeeded + failed) ⌋, or
+          `null` when there were neither
+        - `declines` (totals only) — failure_code → count
+      parameters:
+        - { name: from, in: query, required: false, schema: { type: string, format: date } }
+        - { name: to, in: query, required: false, schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: The report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DailyReport" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422":
+          description: "`VALIDATION_FAILED` (`from`/`to`) or `RANGE_TOO_LARGE` (more than 92 days)"
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ValidationError"
+                  - $ref: "#/components/schemas/Error"
+        "503":
+          description: ClickHouse is unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /health/live:
+    get:
+      operationId: live
+      summary: The process is running
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: Alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { status: { type: string, const: live } }
+
+  /health/ready:
+    get:
+      operationId: ready
+      summary: The replica can serve traffic
+      tags: [Health]
+      security: []
+      description: >
+        Pings PostgreSQL and Redis with a 200 ms timeout. Ready means PostgreSQL
+        is reachable: without it nothing can be served, without Redis
+        everything but sign-in can. Redis is reported so a degraded replica is
+        visible but is not made unready.
+      responses:
+        "200":
+          description: Ready (possibly degraded)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+        "503":
+          description: PostgreSQL is unreachable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+
+components:
+
+  securitySchemes:
+    MerchantApiKey:
+      type: http
+      scheme: bearer
+      description: A secret key issued in the dashboard.
+    ProviderCallbackSignature:
+      type: apiKey
+      in: query
+      name: CheckMacValue
+      description: >
+        Carried as a FORM FIELD, which OpenAPI has no scheme for, so this
+        declaration is documentation. ECPay sends `CheckMacValue` (SHA-256 over
+        the sorted parameters wrapped in the HashKey and HashIV the provider
+        issued paygate); NewebPay sends `TradeSha` over the encrypted `TradeInfo`.
+        paygate recomputes it and compares in constant time before anything is
+        parsed or applied.
+    DashboardSession:
+      type: apiKey
+      in: cookie
+      name: session
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 255 }
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      schema: { type: string, maxLength: 128 }
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema: { type: string }
+  headers:
+    IdempotentReplayed:
+      description: "`true` when the body is a stored answer being replayed."
+      schema: { type: string, const: "true" }
+    RetryAfter:
+      description: Whole seconds until the merchant's bucket holds one token.
+      schema: { type: integer, minimum: 1 }
+
+  responses:
+    BadRequest:
+      description: >
+        `IDEMPOTENCY_KEY_MISSING`, `IDEMPOTENCY_KEY_INVALID`, or
+        `INVALID_REQUEST` — malformed JSON, an unknown field, a wrong type, or
+        card data sent to an endpoint that must not receive it.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthenticated:
+      description: No valid credential of the kind this endpoint accepts
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    PaymentNotFound:
+      description: No such order for the caller
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    IdempotencyKeyInUse:
+      description: A request with this key is still being processed
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: The merchant's rate limit is exhausted
+      headers:
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+
+    CreateOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [merchant_trade_no, amount, currency, item_desc, notify_url, client_back_url]
+      description: >
+        No card fields, and `additionalProperties: false` so that an
+        integration which tries to send one is told at the first attempt rather
+        than having it quietly dropped.
+      properties:
+        merchant_trade_no:
+          type: string
+          pattern: "^[A-Za-z0-9-]{1,20}$"
+          description: The merchant's own order number, unique per merchant (ECPay's MerchantTradeNo).
+        amount: { type: integer, minimum: 1, maximum: 99999999 }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+        item_desc: { type: string, minLength: 1, maxLength: 200 }
+        notify_url:
+          type: string
+          pattern: "^/[^\\s]*$"
+          maxLength: 200
+          description: >
+            Where paygate posts the signed result, server to server — the
+            merchant's own ReturnURL, one level down. In this example every
+            service sits behind one reverse proxy, so it is an absolute PATH; a
+            real deployment would take an absolute `https` URL and apply ECPay's
+            own rules to it (a public host, not a CDN address, ports 80 or 443,
+            punycode for a non-ASCII domain).
+        client_back_url:
+          type: string
+          pattern: "^/[^\\s]*$"
+          maxLength: 200
+          description: >
+            Where the PROVIDER sends the customer when they are done — paygate
+            passes this straight through as `ClientBackURL` and never receives
+            the customer itself. The 200-character limit is not paygate's choice:
+            it is ECPay's limit on that parameter, inherited by whoever fills it.
+
+    CreatedOrder:
+      allOf:
+        - $ref: "#/components/schemas/Payment"
+        - $ref: "#/components/schemas/ProviderHandOff"
+
+    ProviderHandOff:
+      type: object
+      required: [provider, action, fields]
+      description: >
+        The form the merchant's page must submit, and the only reason this call
+        exists. ECPay's own plugin builds this locally and makes no call at all,
+        because that merchant holds its own `HashKey`; under a platform the key is
+        paygate's, so signing is the one thing a merchant cannot do for itself.
+      properties:
+        provider:
+          type: string
+          enum: [ecpay, newebpay]
+          description: Which gateway this order was routed to.
+        action:
+          type: string
+          description: >
+            The provider's cashier URL — another origin, which is the point. The
+            merchant's page posts the fields here and the customer leaves.
+          example: https://payment.ecpay.com.tw/Cashier/AioCheckOut/V5
+        fields:
+          type: object
+          additionalProperties: { type: string }
+          description: >
+            Every parameter that provider expects, signature included, exactly as
+            it must be sent — ECPay's set in the clear (`MerchantID`, `PlatformID`,
+            `MerchantTradeNo`, `TotalAmount`, `ChoosePayment`, `CheckMacValue`
+            and the rest), NewebPay's as `MerchantID`, `TradeInfo`, `TradeSha`,
+            `Version`. paygate's key is in neither, and nor is
+            `OrderResultURL`: `ClientBackURL` is the merchant's own page, which
+            is where the customer goes back to.
+
+    Payment:
+      type: object
+      required: [id, merchant_trade_no, status, amount, currency, item_desc, amount_refunded, created_at]
+      properties:
+        id: { type: string, format: uuid, description: "paygate's trade number (ECPay's TradeNo)" }
+        merchant_trade_no: { type: string }
+        status:
+          type: string
+          enum: [pending, succeeded, refunded]
+          description: >
+            Three states, and neither `processing` nor `failed` is one of them.
+            paygate cannot know whether a customer is at the provider or has
+            closed the tab, so an order with forms outstanding is still
+            `pending`; what is outstanding is on `last_attempt`, where it is a
+            fact rather than a guess (spec.md, "State").
+        amount: { type: integer }
+        currency: { type: string }
+        item_desc: { type: string }
+        amount_refunded: { type: integer }
+        card_brand: { type: [string, "null"], enum: [visa, mastercard, amex, unknown, null] }
+        card_last4: { type: [string, "null"], pattern: "^[0-9]{4}$" }
+        failure_code: { type: [string, "null"] }
+        client_back_url: { type: string }
+        last_attempt:
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [provider, status]
+              properties:
+                provider: { type: string, enum: [ecpay, newebpay] }
+                status: { type: string, enum: [redirected, succeeded, failed, abandoned] }
+                failure_code: { type: [string, "null"] }
+          description: >
+            What became of the most recent form. `redirected` is the window in
+            which the customer is at the provider — paying, authenticating, or
+            gone — and nobody here knows the answer yet. It is the honest
+            substitute for a `processing` status, and a merchant that wants to
+            show "we are waiting" reads this.
+        created_at: { type: string, format: date-time }
+
+    CreateRefundRequest:
+      type: object
+      additionalProperties: false
+      required: [amount]
+      properties:
+        amount:
+          type: integer
+          minimum: 1
+          maximum: 99999999
+          description: >
+            The same ceiling an order has. `REFUND_EXCEEDS_REMAINING` bounds it in
+            practice, but a schema that says so lets a client library refuse an
+            absurd value before a network round trip.
+        reason: { type: string, enum: [requested_by_customer, duplicate, fraudulent] }
+
+    Refund:
+      type: object
+      required: [id, payment_id, amount, currency, status, reason, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        payment_id: { type: string, format: uuid }
+        amount: { type: integer }
+        currency: { type: string }
+        status: { type: string, const: succeeded }
+        reason: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+
+    RefundExceedsRemaining:
+      type: object
+      required: [error, remaining]
+      properties:
+        error: { type: string, const: REFUND_EXCEEDS_REMAINING }
+        remaining: { type: integer }
+
+    EcpayCallback:
+      type: object
+      description: >
+        ECPay's back-channel body. `MerchantTradeNo` is the number PAYGATE
+        allocated for this attempt, not the merchant's — one level up, paygate
+        is the merchant.
+      required: [MerchantID, MerchantTradeNo, TradeNo, RtnCode, RtnMsg, TradeAmt, PaymentDate, CheckMacValue]
+      properties:
+        MerchantID: { type: string, description: paygate's account at ECPay. }
+        MerchantTradeNo: { type: string, description: The attempt's provider_trade_no. }
+        TradeNo: { type: string, description: ECPay's own number for the charge. }
+        RtnCode: { type: string, description: "1 is paid; anything else is a failure." }
+        RtnMsg: { type: string }
+        TradeAmt: { type: string }
+        PaymentDate: { type: string, example: "2026/09/21 14:03:11" }
+        card4no: { type: string, pattern: "^[0-9]{4}$" }
+        card6no: { type: string }
+        CheckMacValue: { type: string }
+
+    NewebpayCallback:
+      type: object
+      description: >
+        NewebPay's back-channel body: the same facts, encrypted. `TradeInfo` is
+        AES-256-CBC over the parameter string and `TradeSha` is SHA-256 over
+        the ciphertext wrapped in the hash pair.
+      required: [Status, MerchantID, TradeInfo, TradeSha, Version]
+      properties:
+        Status: { type: string, description: SUCCESS, or a failure code. }
+        MerchantID: { type: string }
+        TradeInfo: { type: string }
+        TradeSha: { type: string }
+        Version: { type: string }
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 1 }
+
+    DashboardUser:
+      type: object
+      required: [email, merchant]
+      properties:
+        email: { type: string }
+        merchant:
+          type: object
+          required: [id, name, currency, timezone]
+          properties:
+            id: { type: integer }
+            name: { type: string }
+            currency: { type: string }
+            timezone: { type: string }
+
+    CreatedApiKey:
+      type: object
+      required: [id, key, key_prefix, created_at]
+      properties:
+        id: { type: integer }
+        key: { type: string }
+        key_prefix: { type: string }
+        created_at: { type: string, format: date-time }
+
+    ReportFigures:
+      type: object
+      required: [succeeded_count, failed_count, refunded_count, gross_amount, refunded_amount, net_amount, success_rate_bps]
+      properties:
+        succeeded_count: { type: integer }
+        failed_count: { type: integer }
+        refunded_count: { type: integer }
+        gross_amount: { type: integer }
+        refunded_amount: { type: integer }
+        net_amount: { type: integer }
+        success_rate_bps: { type: [integer, "null"], minimum: 0, maximum: 10000 }
+
+    DailyReport:
+      type: object
+      required: [currency, timezone, from, to, days, totals]
+      properties:
+        currency: { type: string }
+        timezone: { type: string }
+        from: { type: string, format: date }
+        to: { type: string, format: date }
+        days:
+          type: array
+          items:
+            allOf:
+              - type: object
+                required: [date]
+                properties:
+                  date: { type: string, format: date }
+              - $ref: "#/components/schemas/ReportFigures"
+        totals:
+          allOf:
+            - $ref: "#/components/schemas/ReportFigures"
+            - type: object
+              required: [declines]
+              properties:
+                declines:
+                  type: object
+                  additionalProperties: { type: integer }
+
+    Readiness:
+      type: object
+      required: [status, checks]
+      properties:
+        status: { type: string, enum: [ready, unready] }
+        checks:
+          type: object
+          required: [postgres, redis]
+          properties:
+            postgres: { type: string, enum: [up, down] }
+            redis: { type: string, enum: [up, down] }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum:
+            - INVALID_REQUEST
+            - IDEMPOTENCY_KEY_MISSING
+            - IDEMPOTENCY_KEY_INVALID
+            - IDEMPOTENCY_KEY_IN_USE
+            - IDEMPOTENCY_KEY_REUSED
+            - MERCHANT_TRADE_NO_TAKEN
+            - UNAUTHENTICATED
+            - INVALID_CREDENTIALS
+            - PAYMENT_NOT_FOUND
+            - API_KEY_NOT_FOUND
+            - CURRENCY_NOT_SUPPORTED
+            - PAYMENT_NOT_REFUNDABLE
+            - REFUND_EXCEEDS_REMAINING
+            - RANGE_TOO_LARGE
+            - RATE_LIMITED
+            - PROVIDER_UNAVAILABLE
+            - SESSION_STORE_UNAVAILABLE
+            - REPORTING_UNAVAILABLE
+            - INTERNAL
+
+    ValidationError:
+      type: object
+      required: [error, field]
+      properties:
+        error: { type: string, const: VALIDATION_FAILED }
+        field: { type: string }

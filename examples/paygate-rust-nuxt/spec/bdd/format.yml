@@ -1,0 +1,1186 @@
+# format.yml — BDD Step Pattern Registry (paygate)
+#
+# ONE registry, two surfaces. The steps whose `When` is an HTTP call
+# (spec/bdd/api/*.feature, run by cucumber-rs) and the steps whose `When` is a
+# real browser action (spec/bdd/e2e/*.feature, run by playwright-bdd) are
+# declared in the same file, because they are the same language. Eight steps are
+# shared verbatim by both surfaces — run_migration, exec_postgresql,
+# postgresql_query_returns, background_work_settled, clickhouse_query_returns,
+# projection_rebuilt, payment_provider_received, merchant_received — so an API
+# Background and an e2e Background seed and assert with byte-identical text.
+# Thirteen more are API-only and fourteen are e2e-only.
+#
+# A note on history: this vocabulary was written while paygate was event
+# sourced, and it has survived three further rewrites of the design — back to
+# mutable state plus an append-only audit table, then callback-only settlement
+# with a real 3-D Secure redirect, then the order moving to a form the browser
+# submits. Two steps were renamed and two were added in all of that. That is the
+# point: a step says WHAT is asserted, not how the service happens to work.
+#
+# All step patterns are fully anchored (^ … $) and match the full step text
+# after the Gherkin keyword (Given / When / Then / And / But) is stripped.
+# Cucumber step definitions are keyword-agnostic; the `keywords` field is
+# documentation-only and enforces readable convention, not runtime behaviour.
+# Capture groups are listed in order of appearance in the pattern.
+#
+# The e2e half of this file — the locator grammar and every browser step — is
+# minimart's, unchanged in meaning (examples/minimart-go-nuxt/spec/bdd/format.yml
+# carries the full reasoning). The front end is the axis this example holds
+# still, so its vocabulary is held still too. What this file adds is the half a
+# payment gateway needs and minimart did not: a report that is only EVENTUALLY
+# consistent, an external provider whose behaviour and callbacks the scenario
+# must be able to pin down, a signed form the harness has to produce, and
+# infrastructure that can fail.
+#
+# ── What a scenario asserts against ──────────────────────────────────────────
+#
+# PostgreSQL is the source of truth and it is STRONGLY consistent (spec.md,
+# "State and the audit log"). Two tables carry it, written in one transaction:
+#
+#   `payments`        the state, updated in place under a row lock
+#   `refunds`         one row per refund of a payment
+#   `payment_events`  an append-only record of every transition — the audit
+#                     trail, and the outbox the relay publishes from
+#   `notifications`   one row per callback owed to a merchant, with its
+#                     attempts and its outcome
+#
+# ClickHouse is the only thing that arrives later: a projection of
+# `payment_events`, and the daily report is the only endpoint that reads it.
+#
+# So the features split in two, deliberately:
+#
+#   `in PostgreSQL query returns …` asserts what happened, immediately, with no
+#   waiting — state and audit row were committed together.
+#
+#   Anything a background worker produces — the ClickHouse projection, the
+#   report endpoint, the report page, a merchant's delivered notification — is
+#   asserted only after `background work has settled`, which is a condition,
+#   never a duration.
+#
+# A scenario that asserts that work without the step is asserting a race, and
+# will be rejected in review even though nothing in the grammar can stop it.
+#
+# ── The locator grammar ──────────────────────────────────────────────────────
+#
+# Every element reference in an e2e step is a single double-quoted token in one
+# of exactly three forms:
+#
+#     "<role>:<literal name>"     "button:Pay"         "heading:Reports"
+#     "<role>:@<i18n.key>"        "button:@checkout.pay"
+#     "testid:<name>"             "testid:report-day"  "testid:report-day-2026-09-18"
+#
+# <role> is a closed vocabulary drawn from WAI-ARIA 1.2; `@key` is resolved
+# through the i18n catalogue of the locale set by `locale is`; `testid:` is the
+# escape hatch for elements no role and name can identify, and is the only form
+# that admits a {contextVar} segment. A `testid:` token matches an element whose
+# data-testid is EXACTLY the token, or begins with the token followed by a
+# hyphen — so rows rendered as data-testid="report-day-2026-09-18" are counted
+# by `list "testid:report-day" has 2 rows` and one is addressed by
+# `region "testid:report-day-2026-09-18" contains:`.
+#
+# ── Carrying identity ────────────────────────────────────────────────────────
+#
+# A request says which credential it carries, in its own docstring, every time:
+#
+#     merchant API   "headers": { "Authorization": "Bearer sk_test_acme_…" }
+#     dashboard      "headers": { "Cookie": "session={ownerSession}" }
+#
+# There is no third. The customer carries nothing paygate issued, because paygate
+# has no endpoint a browser calls (spec.md, NFR-SEC-4), and a provider's signature
+# is a field of the form it posts rather than a header.
+#
+# An API key is a literal: the Background seeds its SHA-256 beside the raw key
+# the requests write, so neither can change without the other. A dashboard
+# session is the real `POST /api/v1/dashboard/login` followed by
+# `save response cookie "session" as "…"`. There is no cookie jar and no
+# ambient identity; nothing survives from one request to the next except the
+# variables a step deliberately saved.
+#
+# The signatures are nobody's business here, and that is deliberate. paygate
+# signs what it hands a provider and verifies what a provider sends back; the
+# PROVIDER MOCK verifies the first and produces the second (spec.md,
+# "Authentication"). So a scenario never writes a digest and the harness never
+# computes one: it asserts "signed correctly" by asserting that the counterparty
+# accepted it, and asserts the opposite with the one step that tampers —
+# `the checkout form is submitted to the payment provider, tampered after
+# signing`, which changes the amount after paygate signed it and expects the
+# provider to refuse. The day a parameter is added, nothing in this file
+# changes.
+#
+# ── Time that is not the scenario's ──────────────────────────────────────────
+#
+# Three things in this domain happen later than the request that caused them:
+# the provider's webhook, the arrival of an event in a projection, and a
+# rebuild. None of them is waited for with a duration — there is still no
+# `wait <n>s` step, on either surface.
+#
+#   The callback does not happen by itself at all. The payment provider mock
+#   queues every outcome it would report and sends NOTHING until a scenario says
+#   `payment provider delivers each pending callback <n> times`. The order of
+#   "the customer is back, but the outcome is not", "callback twice", "callback
+#   to three replicas at once" is therefore written in the feature instead of
+#   being left to a timer.
+#
+#   Background work is waited for with a CONDITION: `background work has
+#   settled` returns when the relay, the ingester and the notifier have all run
+#   out of work. It does one thing and asserts nothing, so it composes with
+#   whatever assertion follows — a SQL query, an HTTP request, a page.
+#
+#   A rebuild is an ordinary infrastructure operation, like a migration:
+#   `projection "reports" is rebuilt from the event log` truncates it and
+#   replays `payment_events` into it, and returns when it is done.
+#
+# ── Concurrency ──────────────────────────────────────────────────────────────
+#
+# `… is called concurrently:` fires an array of envelopes at one instant;
+# `exactly <n> responses are <status>` asserts the set they came back as. The
+# webhook step records its deliveries as the same kind of set, so one assertion
+# reads both. The set and the single response exclude each other: a step that
+# records one clears the other, and an assertion that reads the wrong one fails
+# saying so.
+#
+# Under `@stack:scaled` there are several API replicas and the harness spreads
+# work across them by a FIXED rule, never by chance (spec.md, "Scaling"):
+# single requests go round-robin in the order the scenario sends them, caller i
+# of a concurrent step goes to replica (i mod N), and webhook delivery i goes to
+# replica (i mod N). Every race in scaling.feature is therefore a race between
+# processes, reproducibly.
+#
+# ── What this registry deliberately does not contain ─────────────────────────
+#
+#   No Redis assertion. Everything Redis does here — sessions, the API key
+#   cache, the idempotency lock, the rate limiter — has an outcome the API
+#   exposes, and a scenario asserts the outcome. Redis is not a source of
+#   truth, so its contents are not a fact worth asserting.
+#
+#   No Kafka assertion. Kafka is how events reach projections, and
+#   `projections have caught up` plus a query on the projection asserts the
+#   arrival. Which partition an event lands on is a property of one function
+#   and is a unit test.
+#
+#   No projection write. The projection is only ever written by projecting
+#   events: a scenario that needs history seeds `payment_events` — the same
+#   table the service appends to — and lets it travel relay → Kafka →
+#   ingester. Seeding ClickHouse directly would test a state the system cannot
+#   reach.
+#
+#   No step that is registered and unused. The harness on each surface asserts
+#   that every entry here is implemented by that surface and used by a feature.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONTEXT VARIABLES
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Every {name} a step writes must be saved earlier in the same scenario by a
+# step that declares `produces`. paygate provides none up front: its forged
+# credentials are literals (a garbage session, a revoked key seeded as a row, a
+# webhook signed with a stale timestamp by the step that delivers it), so no
+# credential needs minting before the Background runs.
+
+context_variables:
+  provided: {}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP DEFINITIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+steps:
+
+  # ── Shared: Infrastructure Setup (API + E2E) ────────────────────────────────
+
+  - id: run_migration
+    keywords: [Given]
+    pattern: "^run migration$"
+    docstring: ~
+    description: >
+      Applies every migration in backend/migrations/postgres to this scenario's
+      PostgreSQL and every migration in backend/migrations/clickhouse to its
+      ClickHouse, in that order, through the same function the service runs when
+      SCHEMA_AUTO_MIGRATE is true. DDL only, no seed data. Must be the first step
+      of every Background, on both surfaces. Kafka topics are NOT created here:
+      a topic is infrastructure, created by the stack before the first step with
+      the partition count of the scenario's profile (spec.md, "Isolation").
+
+  - id: exec_postgresql
+    keywords: [Given, And]
+    pattern: "^in PostgreSQL:$"
+    docstring:
+      type: sql
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+    description: >
+      Executes the docstring as raw SQL against this scenario's PostgreSQL, as
+      one statement batch outside any explicit transaction, then sets every
+      serial sequence past the largest id in its table so that rows the service
+      inserts later never collide with explicitly seeded ids.
+      Seeds configuration (merchants, API keys, dashboard users) and HISTORY —
+      history being rows in `payment_events`, the same append-only table the
+      service writes, because that is what the report's projection is built
+      from and the only past it can be rebuilt from. It also stages failure:
+      `UPDATE payment_events SET published_at = NULL` is what a relay that
+      crashed after Kafka acknowledged the message leaves behind.
+      Any SQL error fails the scenario with the driver's message.
+
+  # ── API: HTTP Request ───────────────────────────────────────────────────────
+
+  - id: http_request
+    keywords: [When]
+    pattern: "^(GET|POST|PUT|PATCH|DELETE) (/api/v1/[a-zA-Z0-9/{}:._?=&%-]+):$"
+    captures:
+      - name: method
+        pattern: "GET|POST|PUT|PATCH|DELETE"
+        description: HTTP method (uppercase).
+      - name: path
+        pattern: "/api/v1/[a-zA-Z0-9/{}:._?=&%-]+"
+        description: >
+          Absolute API path starting with /api/v1/, query string allowed. Every
+          path must exist in spec/openapi/openapi.yaml. {camelCase} segments are
+          substituted from the scenario's context variables.
+    docstring:
+      type: json
+      schema:
+        headers:
+          required: false
+          key_pattern: "^[A-Z][A-Za-z0-9]*(?:-[A-Z][A-Za-z0-9]*)*$"
+          description: >
+            Optional request headers in HTTP canonical form. Credentials
+            (Authorization, Cookie), Idempotency-Key and X-Request-Id are all
+            written here. A provider's signature is NOT a header — it is a field
+            of the form it posts — so no step sends one.
+        body:
+          required: false
+          description: >
+            Optional JSON request body. No body is sent when the key is absent or
+            its value is {} or null.
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+    description: >
+      Sends one HTTP request to this scenario's service and records the
+      response for the assertion steps that follow. The client keeps NO COOKIE
+      JAR and follows no redirects: the next request sends exactly the headers
+      its own docstring writes. Under @stack:scaled the k-th single request of
+      the scenario is sent to replica ((k - 1) mod N) + 1, so a sequence of
+      requests visits every replica in a known order. Transport errors fail the
+      step; any HTTP status, 5xx included, is recorded and left to
+      response_status. Records one response and clears any recorded set.
+      A GET that reads a projection (a payment, a report) answers from a read
+      model, so a scenario puts `projections have caught up` before it unless
+      being behind is what it is testing.
+
+  - id: http_request_concurrent
+    keywords: [When]
+    pattern: "^(GET|POST|PUT|PATCH|DELETE) (/api/v1/[a-zA-Z0-9/{}:._?=&%-]+) is called concurrently:$"
+    captures:
+      - name: method
+        pattern: "GET|POST|PUT|PATCH|DELETE"
+        description: HTTP method (uppercase); the same for every caller.
+      - name: path
+        pattern: "/api/v1/[a-zA-Z0-9/{}:._?=&%-]+"
+        description: Absolute API path; the same for every caller.
+    docstring:
+      type: json
+      schema:
+        "[]":
+          required: true
+          description: >
+            A JSON ARRAY of the envelopes http_request takes — "headers" and
+            "body", both optional, no other key. One element is one caller. At
+            least two elements.
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+    description: >
+      Opens one connection per caller, builds every request, parks every caller
+      at a gate, and releases them together onto a single write each — the
+      closest a race can be arranged from outside the service. Under
+      @stack:scaled caller i (0-based) is connected to replica (i mod N) + 1, so
+      a burst of six against three replicas is two callers per process.
+      Every rule of http_request holds per element. A transport failure by any
+      caller fails the step, naming which. The service is not warmed by this
+      step: a scenario whose race must be real fires a concurrent read first
+      (GET /api/v1/health/ready, which touches PostgreSQL and Redis) and says
+      why. Records a SET of responses — read only by response_set_status_count —
+      and clears the single response.
+
+  - id: requests_concurrent
+    keywords: [When]
+    pattern: "^these requests are sent at one instant:$"
+    docstring:
+      type: json
+      schema:
+        "[]":
+          required: true
+          description: >
+            A JSON ARRAY of envelopes, each carrying its own "method" and "path"
+            as well as the optional "headers" and "body" http_request takes. One
+            element is one caller. At least two.
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+    description: >
+      http_request_concurrent's arrangement without its one restriction: every
+      caller may address a DIFFERENT endpoint. Use it when the race is between
+      unlike requests — two merchants spending the same idempotency key on their
+      own orders, a refund arriving while the same payment is being read — and use
+      http_request_concurrent when the point is one endpoint being hammered, which
+      is the commoner case and reads better for it.
+      Every rule of http_request holds per element, including that each path must
+      exist in spec/openapi/openapi.yaml. Callers are built, parked at a gate and
+      released together; under @stack:scaled caller i (0-based) goes to replica
+      (i mod N) + 1, exactly as in the fixed-path form. Records a SET of responses
+      — read only by response_set_status_count — and clears the single response.
+
+  # ── API: What the merchant does with the form ────────────────────────────────
+
+  - id: payment_form_submitted
+    keywords: [When, And]
+    pattern: "^the payment form is submitted to the payment provider(, tampered after signing)?$"
+    captures:
+      - name: variant
+        pattern: ", tampered after signing"
+        description: >
+          Optional. Changes `TotalAmount` (ECPay) or the amount inside
+          `TradeInfo` (NewebPay) AFTER paygate signed the form — the one attack a
+          form carried by a browser invites, and the only cryptographic thing
+          this harness ever does.
+    docstring: ~
+    description: >
+      What the MERCHANT'S PAGE does with the form paygate handed it when the
+      order was created: POST those exact fields to that exact `action`, which is
+      the provider's origin — not paygate's, and not the merchant's. Nothing is
+      re-signed and nothing is added; a scenario that wants an invalid form uses
+      the variant above.
+      The form is the `action` and `fields` of the most recent response, which is
+      the answer to `POST /payments`. There is no second call, and no endpoint of
+      paygate's that a customer's browser ever touches.
+      The provider's answer is recorded as the single response, so
+      response_status reads it: `200` is its cashier, `400` is its refusal.
+      Fails if the last response carried no form, because a scenario that meant
+      to send a customer to a provider and could not is not asserting what it
+      says.
+
+  - id: provider_card_entered
+    keywords: [When, And]
+    pattern: "^the customer pays at the payment provider:$"
+    docstring:
+      type: json
+      schema:
+        card_number:
+          required: true
+          description: >
+            The card. It exists in this system nowhere but here and inside the
+            mock, which is the property the whole design is for — and the number
+            chooses what the provider will eventually say (spec.md, "The payment
+            provider mock").
+        card_expiry:
+          required: true
+          description: MM/YY, as the provider's own form takes it.
+        card_cvc:
+          required: true
+          description: Never leaves the provider, and is not kept even there.
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+    description: >
+      Types the card on the PROVIDER's cashier, exactly where a customer would,
+      and follows to the issuing bank's page. The outcome is queued there, not
+      sent: 3-D Secure has not happened yet, and on this surface there is no
+      browser to do it. Records the provider's response, so a card the provider
+      itself refuses is asserted with response_status and nothing reaches the
+      issuer. Fails unless the previous step reached a cashier.
+
+  # ── API: The provider's back channel ────────────────────────────────────────
+
+  # ── API: Response Assertions ────────────────────────────────────────────────
+
+  - id: response_status
+    keywords: [Then, And]
+    pattern: "^response status is ([1-5][0-9]{2})$"
+    captures:
+      - name: statusCode
+        pattern: "[1-5][0-9]{2}"
+        description: Expected HTTP status code.
+    docstring: ~
+    description: >
+      Asserts the status of the most recent single response. On mismatch the
+      message includes the actual status and body. Fails if the last HTTP step
+      recorded a set instead.
+
+  - id: response_set_status_count
+    keywords: [Then, And]
+    pattern: "^exactly ([0-9]+) responses? (?:is|are) ([1-5][0-9]{2})$"
+    captures:
+      - name: count
+        pattern: "[0-9]+"
+        description: Exact number of responses in the set carrying the status.
+      - name: statusCode
+        pattern: "[1-5][0-9]{2}"
+        description: Expected HTTP status code.
+    docstring: ~
+    description: >
+      Asserts how many responses of the last recorded SET carried this status —
+      the set recorded by http_request_concurrent or by
+      payment_provider_delivers_webhooks. EXACT, never "at least": "one of six
+      callers was charged" is the whole claim a race makes. Fails printing the
+      observed distribution with one body per status. Fails if no set has been
+      recorded.
+
+  - id: response_body_contains
+    keywords: [Then, And]
+    pattern: "^response body contains:$"
+    docstring:
+      type: json
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+      special_values:
+        - token: "\"<non-null>\""
+          description: The field is present and not JSON null.
+        - token: "\"{[a-z][a-zA-Z0-9]+}\""
+          description: Context variable resolved from the scenario's bag.
+        - token: "\"<outlineParam>\""
+          description: Scenario Outline parameter.
+    description: >
+      Partial JSON match against the most recent single response: only keys in
+      the docstring are checked, extra keys are ignored, objects match
+      recursively, arrays match element-wise with equal length. JSON null in the
+      docstring asserts the value IS null. Fails naming the first path that is
+      missing or unequal and printing the actual body.
+
+  - id: response_body_does_not_contain
+    keywords: [Then, And]
+    pattern: "^response body does not contain \"([^\"]+)\"$"
+    captures:
+      - name: text
+        pattern: "[^\"]+"
+        description: >
+          Text that must not appear anywhere in the raw body — a full card
+          number, a CVC field, a password hash, another merchant's reference.
+    docstring: ~
+    description: >
+      Asserts the text does not occur anywhere in the raw response body, as a
+      key or inside a value. Fails printing the surrounding fragment.
+
+  - id: response_header_contains
+    keywords: [Then, And]
+    pattern: "^response header \"([^\"]+)\" contains \"([^\"]+)\"$"
+    captures:
+      - name: header
+        description: Header name, looked up case-insensitively.
+      - name: substring
+        description: Case-sensitive substring of the value.
+    docstring: ~
+    description: >
+      Asserts a header of the most recent single response contains the
+      substring; with repeated headers (Set-Cookie) any occurrence may match.
+      Fails if the header is absent, listing the headers present.
+
+  - id: save_response_body_field
+    keywords: [And, Then]
+    pattern: "^save response body field \"([a-zA-Z_][a-zA-Z0-9_]*)\" as \"([a-z][a-zA-Z0-9]+)\"$"
+    produces: varName
+    captures:
+      - name: field
+        description: Top-level field of the most recent response body.
+      - name: varName
+        description: Context variable name, usable as {varName} afterwards.
+    docstring: ~
+    description: >
+      Stores the named top-level field of the most recent single response as a
+      string (numbers without quotes or exponent). Fails if the body is not an
+      object, the field is absent, or its value is null.
+
+  - id: save_response_cookie
+    keywords: [And, Then]
+    pattern: "^save response cookie \"([a-zA-Z0-9_-]+)\" as \"([a-z][a-zA-Z0-9]+)\"$"
+    produces: varName
+    captures:
+      - name: name
+        pattern: "[a-zA-Z0-9_-]+"
+        description: Cookie name as the Set-Cookie header spells it.
+      - name: varName
+        description: >
+          Context variable name. A dashboard session is carried as
+          "headers": {"Cookie": "session={varName}"}.
+    docstring: ~
+    description: >
+      Stores the value of the named cookie set by the most recent single
+      response. Saving authenticates nothing — there is no cookie jar. Fails if
+      the cookie was not set, or was set to the empty string (which is how a
+      session is CLEARED).
+
+  # ── Shared: PostgreSQL (API + E2E) ──────────────────────────────────────────
+
+  - id: postgresql_query_returns
+    keywords: [Then, And, Given]
+    pattern: "^in PostgreSQL query returns ([0-9]+) rows?:$"
+    captures:
+      - name: rowCount
+        pattern: "[0-9]+"
+        description: >
+          Expected row count. 0 asserts no matching record; 1 asserts exactly
+          one; n > 1 asserts at least n. Exact aggregates are written with
+          `HAVING count(*) = n` and a count of 1.
+    docstring:
+      type: sql
+      content_pattern: "^(?!\\s*$)\\s*SELECT\\s[\\s\\S]+$"
+    description: >
+      Runs the SELECT against this scenario's PostgreSQL immediately, with no
+      waiting, and asserts the number of rows. Nothing in PostgreSQL is ever
+      behind: `payments` and `payment_events` are written in one transaction,
+      so both are true the moment the response is answered.
+      Fails printing the expected and actual counts and the query after
+      substitution.
+
+  # ── Shared: Projections (API + E2E) ─────────────────────────────────────────
+
+  - id: background_work_settled
+    keywords: [Then, When, And, Given]
+    pattern: "^background work has settled$"
+    docstring: ~
+    description: >
+      Waits until no background worker has anything left to do, then returns.
+      Asserts nothing on its own: it is the condition that makes the NEXT step —
+      a ClickHouse query, a report request, a merchant's notification record, a
+      page — a statement about a settled system rather than about a race.
+      Three things must hold at once:
+        · no row of `payment_events` has a NULL published_at (the relay is done)
+        · the ingester's consumer group has committed, on every partition of the
+          payment-events topic, an offset equal to that partition's high
+          watermark (the report's projection is done)
+        · no row of `notifications` is still due — every one has been delivered
+          or has exhausted its attempts (the notifier is done)
+      Polled every 100 ms for up to 30 s; that bound is the example's freshness
+      objective (spec.md, NFR-OLAP-1), so a pipeline slower than it is a
+      failure, not a flake. A scenario that asserts a retry COUNT waits here
+      first, which is why "the merchant was called three times" is a settled
+      fact rather than a sample.
+      On timeout it fails naming what was still in flight: how many audit rows
+      are unpublished, the ingester's lag on each partition, and which
+      notifications are still pending, with their attempt counts.
+
+  - id: clickhouse_query_returns
+    keywords: [Then, And]
+    pattern: "^in ClickHouse query returns ([0-9]+) rows?:$"
+    captures:
+      - name: rowCount
+        pattern: "[0-9]+"
+        description: >
+          EXACT expected row count, including for n > 1 — unlike
+          postgresql_query_returns. A projection is exactly where "at least"
+          hides a duplicate.
+    docstring:
+      type: sql
+      content_pattern: "^(?!\\s*$)\\s*SELECT\\s[\\s\\S]+$"
+    description: >
+      Runs the SELECT against this scenario's ClickHouse immediately and asserts
+      the row count exactly. It does not wait: `projections have caught up` is
+      how a scenario waits, and keeping the two apart is what lets the same
+      query be used to assert that something has NOT arrived yet.
+      Queries over the ReplacingMergeTree projection write FINAL; one that omits
+      it is asserting ClickHouse's merge schedule rather than the pipeline.
+
+  - id: projection_rebuilt
+    keywords: [When, Given, And]
+    pattern: "^projection \"(reports)\" is rebuilt from the event log$"
+    captures:
+      - name: projection
+        pattern: "reports"
+        description: >
+          The one projection this system has: the ClickHouse table the daily
+          report reads. The merchant API has none — it reads PostgreSQL
+          directly — which is why the step names the projection rather than
+          assuming there is only ever one.
+    docstring: ~
+    description: >
+      Truncates the projection and its checkpoint and replays `payment_events`
+      into it, then returns when the replay has finished. It is an ordinary
+      operational command of the worker binary — the one an operator runs after
+      changing the projection's shape or discovering it corrupted — not a
+      test-only entry point, and it reads PostgreSQL rather than Kafka, because
+      the audit table is kept forever and Kafka's retention is not.
+      The projection applies events idempotently, keyed by event id, so a
+      rebuild is safe at any time and the ingester may keep consuming while it
+      runs.
+
+  # ── Shared: The Payment Provider (API + E2E) ────────────────────────────────
+
+  - id: payment_provider_received
+    keywords: [Then, And]
+    pattern: "^payment provider received ([0-9]+) (checkout|refund) requests?$"
+    captures:
+      - name: count
+        pattern: "[0-9]+"
+        description: Exact number of requests.
+      - name: kind
+        pattern: "checkout|refund"
+        description: >
+          checkout — a customer arriving at the provider's cashier with a form
+          paygate signed; refund — a call paygate made to the provider's refund
+          API.
+    docstring: ~
+    description: >
+      Reads this scenario's payment-provider mock request log (`/__control/requests`)
+      and asserts how many requests of that kind it has received since the
+      scenario started — every request, including one whose answer arrived after
+      paygate had stopped waiting, and including one the provider refused for a
+      bad signature. EXACT.
+      This is the assertion a payment service exists to pass, and it can only be
+      made from the far side of the wire. One row in paygate's tables does not
+      prove the customer was charged once: two live attempts would be two orders
+      at the provider and one of paygate's rows, and only the provider can say
+      so. The same is true of a refund retried after a lost answer — paygate
+      sent two, the provider counted two, and exactly one moved money.
+
+  - id: merchant_received
+    keywords: [Then, And]
+    pattern: "^merchant received ([0-9]+) notifications? at \"(/demo-merchant/api/[a-z0-9/-]+)\"$"
+    captures:
+      - name: count
+        pattern: "[0-9]+"
+        description: Exact number of deliveries the merchant's endpoint saw.
+      - name: path
+        pattern: "/demo-merchant/api/[a-z0-9/-]+"
+        description: >
+          The endpoint the payment named as its notify_url when it was created.
+          The demo merchant answers differently per path — always `1|OK`, always
+          `500`, fail twice then `1|OK`, verify the signature first — so a
+          scenario states the MERCHANT's behaviour the same way it states the
+          provider's: in the request that set it up.
+    docstring: ~
+    description: >
+      Reads the demo merchant's delivery log and asserts how many times that
+      endpoint was called. EXACT, and counted from the start of the scenario.
+      It is the other half of payment_provider_received: `notifications` in
+      PostgreSQL says what the gateway BELIEVES it delivered, and this says what
+      the merchant actually received. A retry loop that answers itself would
+      satisfy the first and fail this one.
+      Belongs after `background work has settled`, because delivery is a
+      background worker's job.
+
+  # ── API: The Payment Provider's Callbacks ───────────────────────────────────
+
+  - id: provider_delivers_callbacks
+    keywords: [When, And]
+    pattern: "^payment provider delivers each pending callback ([0-9]+) times?(?:, as (forged|simulated|a wrong amount|return code \"([0-9]+)\"))?$"
+    captures:
+      - name: times
+        pattern: "[0-9]+"
+        description: >
+          How many copies of each pending callback to deliver. 1 is ordinary
+          delivery; more than 1 is the at-least-once redelivery every real
+          provider performs, and the copies of one callback are released
+          together, at one instant.
+      - name: variant
+        pattern: "forged|simulated|a wrong amount|return code \"[0-9]+\""
+        description: >
+          Optional; absent is an honest report of what the card did. The four
+          things a real provider also sends, each of which paygate must answer
+          differently:
+          `forged` — signed with a key that is not the one this provider issued
+          paygate, which is the only thing standing between an open endpoint and
+          a free payment.
+          `simulated` — ECPay's `SimulatePaid=1`, produced by pressing the
+          "confirm test payment" button in its back office. It looks exactly
+          like a payment and is not one.
+          `a wrong amount` — a `TradeAmt` that does not match the order. Nothing
+          may be settled on it, and it may not be acknowledged either.
+          `return code "<code>"` — any other `RtnCode`. The set is open (`1` paid,
+          `10100058`/`10200163` failed, `10300066` "pending confirmation, do not
+          ship", and more added
+          over the years), so an unknown one must be recorded, acknowledged and
+          acted on in no way at all.
+      - name: returnCode
+        pattern: "[0-9]+"
+        description: The RtnCode, present only with the `return code` variant.
+    docstring: ~
+    description: >
+      The mock queues, in order, every outcome it would report — one per card it
+      was given — and reports none of them until something releases them. There
+      are exactly two things that do: the customer authenticating on the mock
+      issuer's 3-D Secure page, which is what happens on the e2e surface and is
+      why this step is API-only; and this step, which is the API surface playing
+      the customer.
+      It then delivers the queue in order: all copies of the first callback are
+      parked at a gate and released together, their answers awaited, then the
+      next callback's. Each delivery is form-encoded in that provider's shape
+      and signed with the pair the scenario seeded (ECPay's CheckMacValue, NewebPay's
+      TradeSha over the encrypted TradeInfo), and under @stack:scaled delivery i
+      (0-based, across the whole step) goes to replica (i mod N) + 1.
+      A delivery paygate ACKNOWLEDGED — answered with the body `1|OK` and
+      nothing else — leaves the queue. One it refused stays queued and can be
+      released again, which is exactly what a provider does. So does one that
+      could not be made at all because the process was gone: that is recorded as
+      refused, with no status, and the step does NOT fail — losing the payment
+      there is the failure this arrangement exists to rule out, and a scenario
+      shows it by stopping paygate, delivering, starting it and delivering
+      again.
+      The gateway's answers are recorded as a SET — read by
+      `exactly <n> responses are <status>` and by callbacks_acknowledged — and
+      the single response is cleared. Fails if the queue is empty, because a
+      scenario that expected a callback and got none is not asserting what it
+      says.
+
+  - id: callbacks_acknowledged
+    keywords: [Then, And]
+    pattern: "^exactly ([0-9]+) callbacks? (?:was|were) (acknowledged|refused)$"
+    captures:
+      - name: count
+        pattern: "[0-9]+"
+        description: How many of the deliveries just made ended that way.
+      - name: outcome
+        pattern: "acknowledged|refused"
+        description: >
+          Acknowledged means the body was exactly `1|OK`. Refused is everything
+          else, including a `200` carrying the wrong body — which is a failed
+          delivery at ECPay and must be one here.
+    docstring: ~
+    description: >
+      Asserts what the PROVIDER made of paygate's answers, read from the mock's
+      delivery log rather than from paygate's own rows. It is the only way to
+      state the acknowledgement contract from the side that enforces it: a
+      status code says the request arrived, `1|OK` says the payment was taken
+      responsibility for, and a gateway that confuses the two loses money
+      quietly. Reads the set the previous delivery step recorded.
+
+  # ── API: Asking the provider, instead of guessing ───────────────────────────
+
+  - id: provider_next_query_answer
+    keywords: [Given, And]
+    pattern: "^payment provider answers the next query (?:with trade status \"(0|1|10200095)\"|as (forged|throttled))$"
+    captures:
+      - name: tradeStatus
+        pattern: "0|1|10200095"
+        description: >
+          ECPay's `TradeStatus`: `0` the order exists and is unpaid, `1` it is
+          paid, `10200095` the consumer never completed it. Those three are the
+          whole answer paygate is allowed to act on, and the third is the ONLY
+          one that may end an attempt (spec.md, "Reconciling what never came
+          back").
+      - name: variant
+        pattern: "forged|throttled"
+        description: >
+          Instead of an answer, one of the two ways an answer can be worthless.
+          `forged` returns a well-formed body whose signature was made with a key
+          this provider never issued — the query is the same trust boundary as the
+          callback, in the other direction, and a reconciler that believes
+          whatever comes back has given an attacker a way to settle orders.
+          `throttled` returns `403`, which is what ECPay does to a caller that asks
+          too often and then stops answering for half an hour.
+    docstring: ~
+    description: >
+      Arms the provider mock's `QueryTradeInfo` so that the next query gets this
+      answer. It exists because the interesting cases are the ones where the
+      callback never arrived: paygate must not decide what happened by itself,
+      and a scenario cannot state "the provider will say it was paid" any other
+      way. Affects the next query only; a second query needs a second Given.
+      Nothing paygate does to a forged or throttled answer may change an order —
+      an unusable answer is indistinguishable from no answer, and the attempt is
+      simply asked about again later.
+
+  - id: reconciler_runs
+    keywords: [When, And]
+    pattern: "^the reconciler runs$"
+    docstring: ~
+    description: >
+      Runs the reconciliation worker once, to completion, the way
+      `projection "reports" is rebuilt from the event log` runs a rebuild. It
+      selects attempts that are still outstanding and older than
+      `RECONCILE_AFTER_MINUTES`, asks the provider about each, and applies only
+      what the provider said. It is a one-shot command rather than a wait,
+      because a scenario has to be able to say WHEN paygate asked — which is the
+      whole point of not asking too early.
+      Ages are staged in SQL (`UPDATE payment_attempts SET started_at = …`),
+      because a test that waited an hour would not be a test.
+
+  # ── API: Infrastructure Failure ─────────────────────────────────────────────
+
+  - id: service_state
+    keywords: [Given, When, And]
+    pattern: "^service \"(api|relay|ingester|notifier|redis|clickhouse)\" is (stopped|started)$"
+    captures:
+      - name: service
+        pattern: "api|relay|ingester|notifier|redis|clickhouse"
+        description: >
+          A closed set: the components whose failure the gateway promises to
+          survive (spec.md, "Failure model"). `api` is in it because paygate is
+          NOT on the payment path — a payment already handed to a provider must
+          survive paygate being gone, and the only way to state that is to take
+          paygate away while one is in flight. PostgreSQL and Kafka are not in
+          it: losing PostgreSQL is losing the source of truth, and the gateway
+          promises nothing but refusal; Kafka's failure is indistinguishable,
+          from outside, from the relay's.
+      - name: state
+        pattern: "stopped|started"
+        description: >
+          stopped — every container of that service in this scenario's stack is
+          stopped (all replicas under @stack:scaled), and the step returns once
+          none is running. started — they are started again with the same
+          configuration and network aliases, and the step returns once each is
+          ready by the same wait strategy the stack used at startup.
+    docstring: ~
+    description: >
+      Stops or starts a dependency mid-scenario — fault injection, from outside,
+      with no cooperation from the service. A stopped Redis loses its contents
+      (it runs without persistence, as the deployment does); a stopped
+      ClickHouse keeps its data and schema (its data directory is the
+      container's own, not a tmpfs). Fails if the service is already in the
+      requested state, because a scenario that thinks it caused an outage and
+      did not is asserting nothing.
+
+  # ── E2E: Browser Setup ──────────────────────────────────────────────────────
+  #
+  # There is no step that establishes a session. A scenario that needs one signs
+  # in the way a person does — `visit "/login"`, two `fill` steps, a `click` —
+  # which is four lines of the same vocabulary every other browser step is
+  # written in, and which exercises the login page instead of going around it.
+
+  - id: locale_is
+    keywords: [Given, And]
+    pattern: "^locale is \"([a-z]{2}_[A-Z]{2})\"$"
+    captures:
+      - name: locale
+        pattern: "[a-z]{2}_[A-Z]{2}"
+        description: Locale identifier, e.g. zh_TW or en_US.
+    docstring: ~
+    description: >
+      Selects the UI locale for this scenario: sets the app's locale cookie on
+      the browser context and the matching Accept-Language header, and loads the
+      same catalogue into the step runner so that "@key" locators resolve to the
+      strings this locale renders.
+      Must appear before the first navigation of the scenario; a Background may
+      set a default and a scenario may override it, in which case the last one
+      before the first visit wins. Appearing after a page has loaded is not
+      supported and fails the step, because the already-rendered page would then
+      disagree with the catalogue the locators are resolved against.
+      Fails if the locale is not one the app ships (zh_TW, en_US).
+
+  # ── E2E: Navigation and Interaction ─────────────────────────────────────────
+
+  - id: visit
+    keywords: [Given, When, And]
+    pattern: "^visit \"(/[^\"]*)\"$"
+    captures:
+      - name: path
+        pattern: "/[^\"]*"
+        description: >
+          Site-relative path, always starting with /. It is resolved against the
+          scenario's own base URL (https://127.0.0.1:<its own port>), so a
+          feature never names an origin.
+    docstring: ~
+    description: >
+      Navigates to the path and waits for the SPA to finish its initial render
+      (network idle plus the app's hydration marker). Does NOT assert the
+      resulting URL: a page that redirects an unauthenticated visitor to /login
+      is a legitimate outcome, and the feature states it with page_url_is.
+      Fails on a navigation error or a non-2xx document response.
+
+  - id: click
+    keywords: [When, And]
+    pattern: "^click \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\"$"
+    captures:
+      - name: locator
+        description: Locator token; see the locator grammar at the top of this file.
+    docstring: ~
+    description: >
+      Resolves the locator, waits for the element to be visible and enabled,
+      clicks it, and then waits for whatever the click set in motion to finish
+      the same way visit does — network idle plus the app's hydration marker.
+      That trailing wait is what makes a click composable: the step after it
+      sees the page the click produced, so a scenario can sign in with
+      `click "button:@auth.signIn"` and navigate on the next line without a
+      timeout, a retry or a sleep standing between them. It is a condition, not
+      a duration: a click that changes nothing costs one idle check.
+      Strict by design: if the locator resolves to more than one element the
+      step fails with Playwright's strict-mode message listing the matches,
+      rather than acting on the first one.
+      Fails if no element matches within the default timeout, naming the locator
+      as written in the feature and, for an "@key" locator, the string the key
+      resolved to in the active locale.
+
+  - id: fill
+    keywords: [When, And]
+    pattern: "^fill \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" with \"([^\"]*)\"$"
+    captures:
+      - name: locator
+        description: Locator token of an editable field (textbox, combobox, spinbutton…).
+      - name: value
+        pattern: "[^\"]*"
+        description: >
+          Text to enter. An empty string clears the field. {contextVar} tokens
+          are substituted before typing.
+    docstring: ~
+    description: >
+      Waits for the field to be visible and editable, clears it, and enters the
+      value, emitting the same input events a user would.
+      Fails on a non-editable or ambiguous target, and on a missing context
+      variable referenced by the value.
+
+  - id: press_key
+    keywords: [When, And]
+    pattern: "^press \"([A-Za-z0-9+]+)\"$"
+    captures:
+      - name: key
+        pattern: "[A-Za-z0-9+]+"
+        description: >
+          A Playwright key name, optionally with modifiers joined by +
+          (e.g. "Enter", "Escape", "Control+Enter").
+    docstring: ~
+    description: >
+      Sends the key combination to the element that currently has focus, or to
+      the page body when nothing is focused.
+      Fails on an unknown key name. Used for keyboard submits — the accessible
+      path a click-only test never covers.
+
+  # ── E2E: Assertions ─────────────────────────────────────────────────────────
+
+  - id: navigate_back
+    keywords: [When, And]
+    pattern: "^go back$"
+    docstring: ~
+    description: >
+      The browser's own Back button, and it is here because in payments it is not
+      a convenience — it is the commonest way a customer ends up paying twice.
+      Coming back from a provider's cashier lands on the page that sent them
+      there, and if that page hands out a payment form on render, the customer now
+      holds two live ways to pay one order (e2e `shop.feature`,
+      `duplicate_payment.feature`).
+      One entry of history, waiting for the page to settle as `visit` does. Fails
+      if there is nothing to go back to, because a scenario that thinks it went
+      back and did not is asserting the wrong page.
+
+  - id: page_url_is
+    keywords: [Then, And]
+    pattern: "^page URL is \"(/[^\"]*)\"$"
+    captures:
+      - name: path
+        pattern: "/[^\"]*"
+        description: >
+          Expected site-relative path, including any query string, excluding the
+          origin. {contextVar} tokens are substituted before comparison.
+    docstring: ~
+    description: >
+      Waits until the address bar's path (plus query) equals the expected value,
+      up to the default timeout, then passes. Polling rather than sampling once
+      is what makes it usable directly after a click that triggers a client-side
+      route change.
+      Comparison is exact, not prefix — "/products" does not match
+      "/products?page=2". Fails reporting the actual URL.
+
+  - id: element_visibility
+    keywords: [Then, And]
+    pattern: "^\"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" is (visible|hidden)$"
+    captures:
+      - name: locator
+        description: Locator token.
+      - name: state
+        pattern: "visible|hidden"
+        description: >
+          visible — present in the DOM and rendered with a non-empty box.
+          hidden — absent from the DOM, or present but not rendered. Both count
+          as hidden on purpose: a feature should not have to know which way the
+          app chose to remove an element.
+    docstring: ~
+    description: >
+      Waits for the locator to reach the given state, up to the default timeout.
+      Strict: if more than one element matches, the step fails rather than
+      reporting the state of the first.
+      Fails reporting the state actually observed when the timeout expires.
+
+  - id: element_text_is
+    keywords: [Then, And]
+    pattern: "^text of \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" is \"([^\"]*)\"$"
+    captures:
+      - name: locator
+        description: Locator token.
+      - name: expected
+        pattern: "[^\"]*"
+        description: >
+          Expected text. Compared after whitespace normalisation (runs of
+          whitespace collapsed to one space, ends trimmed). {contextVar} tokens
+          are substituted first; an empty string asserts the element renders no
+          text at all.
+    docstring: ~
+    description: >
+      Waits for the element's accessible text (innerText, whitespace-normalised)
+      to equal the expected string. Equality, not containment — containment is
+      how a test ends up passing on a table header.
+      Fails reporting both strings with the normalisation already applied.
+
+  - id: region_contains
+    keywords: [Then, And]
+    pattern: "^region \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" contains:$"
+    captures:
+      - name: locator
+        description: Locator token of the container element to scope the match to.
+    docstring:
+      type: json
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+      special_values:
+        - token: "\"<non-null>\""
+          description: >
+            Asserts the element exists inside the region and its normalised text
+            is non-empty. An element that renders an empty string fails.
+        - token: "\"{[a-z][a-zA-Z0-9]+}\""
+          description: >
+            Context variable resolved from the scenario's state bag before
+            comparison (e.g. "{paymentId}").
+        - token: "\"<outlineParam>\""
+          description: >
+            Scenario Outline parameter, substituted from the Examples table
+            before the step runs.
+    description: >
+      The browser-side twin of response_body_contains, with the same semantics:
+      a partial match. The docstring is a flat JSON object whose KEYS are
+      locator tokens resolved WITHIN the region, and whose VALUES are the text
+      those elements must render (whitespace-normalised, compared for equality).
+      Only the keys listed are checked; anything else inside the region is
+      ignored, so the assertion does not break when a column is added.
+      Fails on the first key whose element is missing, ambiguous, or whose text
+      differs — naming the key, the expected text and the actual text. A missing
+      key is reported as missing, never silently treated as empty.
+
+  - id: list_row_count
+    keywords: [Then, And]
+    pattern: "^list \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" has (\\d+) rows?$"
+    captures:
+      - name: locator
+        description: >
+          Locator token matching EVERY row of the list — typically the family
+          testid the rows share, e.g. "testid:report-day" against rows rendered
+          as data-testid="report-day-2026-09-18" (see the hyphen-family rule at the top
+          of this file). Unlike every other assertion this one is deliberately
+          non-strict about multiplicity — counting is its purpose.
+      - name: count
+        pattern: "\\d+"
+        description: Exact expected number of matching elements.
+    docstring: ~
+    description: >
+      Waits until the number of elements matching the locator equals count, up
+      to the default timeout, then passes.
+      The count is EXACT. There is no "at least" form: ">= 1" is the assertion
+      that let an empty table pass as a populated one, and it is not expressible
+      here. 0 is a legitimate expectation and asserts the list is empty.
+      Fails reporting the expected and the last observed count.
+
+  - id: row_contains
+    keywords: [Then, And]
+    pattern: "^row (\\d+) of \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" contains:$"
+    captures:
+      - name: index
+        pattern: "\\d+"
+        description: 1-based row index in document order.
+      - name: locator
+        description: Locator token matching every row of the list.
+    docstring:
+      type: json
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+      special_values:
+        - token: "\"<non-null>\""
+          description: Element exists within the row and its normalised text is non-empty.
+        - token: "\"{[a-z][a-zA-Z0-9]+}\""
+          description: Context variable resolved before comparison.
+        - token: "\"<outlineParam>\""
+          description: Scenario Outline parameter substituted from the Examples table.
+    description: >
+      Identical to region_contains, except the region is the Nth element
+      matching the row locator instead of a single named container.
+      Fails if fewer than `index` rows exist, reporting how many there are, so
+      an off-by-one is never reported as a missing key.
+
+  - id: network_request_responded
+    keywords: [Then, And]
+    pattern: "^network request \"(GET|POST|PUT|PATCH|DELETE) ([^\"]+)\" responded (\\d{3})$"
+    captures:
+      - name: method
+        pattern: "GET|POST|PUT|PATCH|DELETE"
+        description: HTTP method (uppercase).
+      - name: path
+        pattern: "[^\"]+"
+        description: >
+          Path of the request URL, compared exactly and without the origin or
+          query string (e.g. /api/v1/dashboard/login). A path under /api/v1 must
+          exist in spec/openapi/openapi.yaml; a path under /demo-merchant/api
+          must exist in spec/openapi/demo-merchant.yaml.
+      - name: status
+        pattern: "\\d{3}"
+        description: Expected response status code.
+    docstring: ~
+    description: >
+      Asserts that, at some point during this scenario, the page issued a
+      request with this method and path and received this status. The scenario's
+      network log is recorded from the first navigation onward, so a request
+      made before the assertion step is found without any waiting; if it has not
+      happened yet the step waits for it up to the default timeout.
+      Matches the most recent request with that method and path.
+      Fails listing every request recorded for that path with its status, or
+      stating that none was made.
+
+  - id: console_has_no_errors
+    keywords: [Then, And]
+    pattern: "^console has no errors$"
+    docstring: ~
+    description: >
+      Asserts that the browser console recorded no `error`-level message and no
+      uncaught exception since the scenario started, and that no request failed
+      at the transport level.
+      Fails printing every error collected with its source location. Warnings
+      and `info` are ignored.
+      Taken literally: there is no allow-list of excusable messages, because the
+      wording of a browser's console entry belongs to the browser and the same
+      wording carries real failures. A page that provokes an expected error must
+      stop provoking it — which is why the API sets a readable session hint
+      beside its HttpOnly token, so that an anonymous page load asks no
+      protected endpoint and produces no 401 (see spec.md, "Authentication").
+      The one outcome that is not a failure is a request the page itself
+      cancelled (a link prefetch abandoned when the visitor navigates): it never
+      reached the transport level and never produced an answer, and an abort
+      that mattered surfaces as a missing element in the assertion that needed
+      it.
+
+  - id: save_text_as
+    keywords: [Then, When, And]
+    pattern: "^save text of \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" as \"([a-z][a-zA-Z0-9]+)\"$"
+    produces: varName
+    captures:
+      - name: locator
+        description: Locator token of the element to read.
+      - name: varName
+        description: >
+          Context variable name; usable afterwards as {varName} inside SQL and
+          JSON docstrings and inside a testid locator segment.
+    docstring: ~
+    description: >
+      The browser-side twin of save_response_body_field. Waits for the element,
+      reads its whitespace-normalised text, and stores it in the scenario's
+      context bag.
+      Fails if the element is missing or ambiguous, or if its text is empty —
+      saving "" would make every later interpolation quietly wrong.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DOCSTRING TYPES
+# ─────────────────────────────────────────────────────────────────────────────
+
+docstring_types:
+
+  sql:
+    marker: "sql"
+    marker_pattern: "^sql$"
+    content_must_not_be_empty: true
+    context_var_pattern: "\\{[a-z][a-zA-Z0-9]+\\}"
+    context_var_delimiter: "single-quote"
+
+  json:
+    marker: "json"
+    marker_pattern: "^json$"
+    content_must_not_be_empty: true
+    must_be_valid_json_after_substitution: true
+    context_var_pattern: "\\{[a-z][a-zA-Z0-9]+\\}"
+    context_var_delimiter: "double-quote"
+    special_value_pattern: "\"<non-null>\""
+    outline_param_pattern: "\"<[a-zA-Z][a-zA-Z0-9]+>\""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCENARIO OUTLINE SUBSTITUTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+outline_substitution:
+  token_pattern: "<([a-zA-Z][a-zA-Z0-9]*)>"
+  scope:
+    - step_text
+    - docstring
+  description: >
+    Tokens matching <columnName> in both step text and docstrings are replaced
+    with the corresponding column value from the Examples table before the step
+    definition receives the string.

@@ -1,0 +1,633 @@
+openapi: "3.1.0"
+
+info:
+  title: payment provider (ECPay and NewebPay, mocked)
+  version: "1.0.0"
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  description: |
+    NOT paygate. This is the **external** side: the gateways paygate integrates,
+    mocked closely enough that the integration is real work. One process serves
+    both shapes, ECPay under `/provider/ecpay` and NewebPay under `/provider/newebpay`,
+    and it is a counterparty rather than a stub — it verifies what paygate signs
+    and refuses what does not check out.
+
+    This file exists because it is the contract paygate is written against. Two
+    things in it decide most of paygate's code:
+
+    - **The cashier is here**, so the card is here. paygate has no card field
+      and no PCI scope; that is the entire reason for the redirect.
+    - **The back channel is the truth.** The provider tells paygate the outcome
+      out of band and expects the body `1|OK`; anything else and the callback
+      stays owed — in a real gateway it is resent on a schedule, and here it
+      stays in the queue until a scenario releases it again, which is the same
+      fact without a timer. The browser's return carries nothing paygate reads.
+
+    What is a mock and would not be in production: the **control surface** under
+    `/__control`, which lets a scenario release a queued callback without a
+    browser, and read back what the provider was sent. Nothing under
+    `/__control` exists in paygate itself — the gateway under test carries no
+    test-only code.
+
+    Served behind the same reverse proxy, at its own origin, because "the card
+    went somewhere else" is a claim the e2e suite has to be able to check.
+
+servers:
+  - url: "https://{host}/provider"
+    variables:
+      host: { default: 127.0.0.1 }
+
+tags:
+  - name: ECPay
+    description: ECPay's shape — parameters in the clear, signed with CheckMacValue
+  - name: NewebPay
+    description: NewebPay's shape — parameters encrypted into TradeInfo, signed with TradeSha
+  - name: Control
+    description: The test control surface. Not part of any real provider.
+
+paths:
+
+  /ecpay/Cashier/AioCheckOut/V5:
+    post:
+      operationId: ecpayCashier
+      summary: The cashier — where the customer arrives and the card is typed
+      tags: [ECPay]
+      description: |
+        `application/x-www-form-urlencoded`, submitted by the CUSTOMER'S
+        BROWSER from a form paygate signed. Every value is a string, as an HTML
+        form sends them.
+
+        The provider verifies first, and this is what makes the arrangement
+        worth having in a test suite: `CheckMacValue` is recomputed from the
+        other parameters, sorted by name and wrapped in the `HashKey` and
+        `HashIV` this account was issued. A form whose amount was changed after
+        paygate signed it does not check out, and the customer sees an error
+        page instead of a cashier — which is how `handoff.feature` asserts that
+        paygate signs the amount without any digest appearing in a spec file.
+
+        `MerchantTradeNo` must never have been seen before, whatever became of
+        the order it named. That is ECPay's rule and the reason paygate allocates
+        a fresh `provider_trade_no` for every attempt. Submitting the SAME form
+        twice is not that: it is the same order arriving again, and the customer
+        simply sees the cashier again.
+
+        The page has a Cancel that returns the customer to the `ClientBackURL`
+        without paying — which is how a customer who changes their mind leaves,
+        and how the e2e suite gets back to paygate without inventing a URL.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/EcpayCheckoutForm" }
+      responses:
+        "200":
+          description: The cashier page, with a card form
+          content:
+            text/html:
+              schema: { type: string }
+        "400":
+          description: >
+            `CheckMacValue Error`, or `MerchantTradeNo` reused. An error page,
+            not a redirect: the customer is stuck here, and paygate is not told
+            anything, because from the provider's side nothing happened.
+          content:
+            text/html:
+              schema: { type: string }
+
+  /ecpay/Cashier/Card:
+    post:
+      operationId: ecpaySubmitCard
+      summary: The card, typed at the provider
+      tags: [ECPay]
+      description: |
+        Submitted by the customer's browser, to the provider, over the
+        provider's origin. **The only place in this repository a card number
+        exists**, and it exists in a mock.
+
+        The number chooses what the provider will eventually say, the way real
+        providers publish test cards (spec.md, *The payment provider mock*).
+        Every card that passes the provider's own validation goes on to 3-D
+        Secure: the outcome is queued, not sent, until the customer
+        authenticates at the issuer.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/CardForm" }
+      responses:
+        "303":
+          description: On to the issuing bank
+          headers:
+            Location:
+              description: The issuer's 3-D Secure page, `/provider/issuer/3ds/{attempt}`.
+              schema: { type: string }
+        "400":
+          description: The provider refused the card before the issuer ever saw it
+          content:
+            text/html:
+              schema: { type: string }
+
+  /issuer/3ds/{providerTradeNo}:
+    get:
+      operationId: issuerAuthenticationPage
+      summary: The issuing bank's 3-D Secure page
+      tags: [ECPay, NewebPay]
+      description: |
+        A third party again: not paygate's, not the merchant's, and not the
+        provider's either. It offers both buttons — authenticate, or fail — so
+        that a browser can take either path with the same card, and the card
+        decides what the provider says afterwards.
+      parameters:
+        - name: providerTradeNo
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The bank's page
+          content:
+            text/html:
+              schema: { type: string }
+
+  /issuer/3ds/{providerTradeNo}/authenticate:
+    post:
+      operationId: issuerAuthenticate
+      summary: The customer authenticates, or fails to
+      tags: [ECPay, NewebPay]
+      description: |
+        Releases the queued outcome: the provider sends its back channel to
+        paygate and redirects the browser to the `ClientBackURL` paygate gave
+        it. **In that order in the mock, and in no guaranteed order in life** —
+        which is why paygate reads its own rows when the customer lands rather
+        than believing the browser.
+      parameters:
+        - name: providerTradeNo
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [outcome]
+              properties:
+                outcome: { type: string, enum: [authenticate, fail] }
+      responses:
+        "303":
+          description: Back to the ClientBackURL paygate registered
+          headers:
+            Location: { schema: { type: string } }
+
+  /ecpay/CreditDetail/DoAction:
+    post:
+      operationId: ecpayRefund
+      summary: Refund, in full or in part
+      tags: [ECPay]
+      description: |
+        The one call paygate makes to a provider and waits for, so it is the one
+        place a provider's silence is paygate's problem. Signed the same way;
+        an unsigned or tampered request is refused.
+
+        **It deduplicates on `RefundTradeNo`** — the refund's own id, which
+        paygate sends — so a refund whose answer was lost is safe to send again.
+        That is why paygate may answer its merchant `502` and leave the refund
+        `pending` instead of guessing.
+
+        The amount selects the behaviour, so that a scenario states it in its own
+        request: `777` answers after 800 ms, `119` answers `503`, `408` never
+        answers **and refunds anyway**.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/EcpayRefundRequest" }
+      responses:
+        "200":
+          description: >
+            `1|OK`, or `1|OK` again for a `RefundTradeNo` already seen — the
+            answer that makes a retry safe.
+          content:
+            text/plain:
+              schema: { type: string }
+        "400":
+          description: Signature, unknown trade number, or more than remains
+          content:
+            text/plain:
+              schema: { type: string }
+        "503":
+          description: The provider is having a bad day (amount `119`)
+          content:
+            text/plain:
+              schema: { type: string }
+
+  /ecpay/Cashier/QueryTradeInfo/V5:
+    post:
+      operationId: ecpayQueryTradeInfo
+      summary: Ask what became of an order
+      tags: [ECPay]
+      description: |
+        **The recovery path, and the only one ECPay offers.** When no callback
+        arrives, this is how a merchant finds out what happened instead of
+        deciding for itself — and ECPay's own documentation says so: "if the
+        payment result notification has not been received because authorization
+        took too long, use the query order API to check before displaying the
+        payment result."
+
+        Two details that shape paygate's reconciler. `TimeStamp` is valid for
+        three minutes, so a host with a wrong clock cannot query at all — which
+        is why clock synchronisation is in the integration notes rather than in a
+        footnote. And the answer is **not JSON**: it is a `&`-separated
+        `key=value` string, signed, which paygate must verify before believing.
+
+        Calling it too often earns `403` and half an hour of silence, so the
+        reconciler throttles per attempt rather than sweeping everything it can
+        see (spec.md, "Reconciling what never came back").
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [MerchantID, MerchantTradeNo, TimeStamp, CheckMacValue]
+              properties:
+                MerchantID: { type: string, description: The SHOP's account, as on the hand-off. }
+                PlatformID: { type: string, description: paygate's platform code. }
+                MerchantTradeNo: { type: string }
+                TimeStamp: { type: string, description: Unix seconds. Valid for three minutes. }
+                CheckMacValue: { type: string }
+      responses:
+        "200":
+          description: >
+            `key=value&key=value…` as plain text, not JSON. `TradeStatus` is the
+            part that matters: `0` created and unpaid, `1` paid, `10200095` the
+            consumer never completed it.
+          content:
+            text/plain:
+              schema: { type: string }
+              examples:
+                paid:
+                  value: "MerchantID=2000132&MerchantTradeNo=ACME00000001SN4f2a1&TradeStatus=1&TradeAmt=2500&PaymentDate=2026/09/21 14:03:11&CheckMacValue=..."
+                neverPaid:
+                  value: "MerchantID=2000132&MerchantTradeNo=ACME00000001SN4f2a1&TradeStatus=10200095&CheckMacValue=..."
+        "403":
+          description: Queried too fast. The provider stops answering for 30 minutes.
+          content:
+            text/plain:
+              schema: { type: string }
+
+  /newebpay/MPG/mpg_gateway:
+    post:
+      operationId: newebpayCashier
+      summary: The cashier — NewebPay's shape
+      tags: [NewebPay]
+      description: |
+        The same arrival, encrypted. `TradeInfo` is the parameter string
+        AES-256-CBC encrypted with the `HashKey` and `HashIV`, and `TradeSha` is
+        SHA-256 over the ciphertext wrapped in the same pair. The provider
+        decrypts, verifies, and shows the same cashier.
+
+        It exists so that the second adapter is written against something that
+        actually refuses a wrong one. Everything paygate does on either side of
+        it — open an attempt, sign, hand off, verify the callback, settle once —
+        is the same code.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/NewebpayCheckoutForm" }
+      responses:
+        "200":
+          description: The cashier page, with a card form
+          content:
+            text/html:
+              schema: { type: string }
+        "400":
+          description: TradeSha did not verify, or TradeInfo would not decrypt
+          content:
+            text/html:
+              schema: { type: string }
+
+  /newebpay/API/CreditCard/Close:
+    post:
+      operationId: newebpayRefund
+      summary: Refund — NewebPay's shape
+      tags: [NewebPay]
+      description: >
+        The same refund with NewebPay's parameter names and encryption, including
+        the deduplication on paygate's own refund number.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/NewebpayRefundRequest" }
+      responses:
+        "200":
+          description: The result, encrypted
+          content:
+            application/json:
+              schema: { type: object }
+
+  /__control/callbacks:
+    get:
+      operationId: listQueuedCallbacks
+      summary: What the provider is holding, and what it has sent
+      tags: [Control]
+      description: >
+        The queue a scenario inspects instead of waiting. One entry per charge
+        the provider was asked for, in order.
+      responses:
+        "200":
+          description: The queue
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pending, delivered]
+                properties:
+                  pending: { type: array, items: { $ref: "#/components/schemas/QueuedCallback" } }
+                  delivered: { type: array, items: { $ref: "#/components/schemas/DeliveredCallback" } }
+
+    post:
+      operationId: releaseQueuedCallbacks
+      summary: Send every queued callback, n times
+      tags: [Control]
+      description: |
+        The API surface playing the customer, because there is no browser there:
+        it releases what the issuer's page would have released. Copies of one
+        callback are fired at one instant, which is how at-least-once delivery
+        is turned into an assertion rather than a hope.
+
+        Under a scaled stack, delivery i goes to replica (i mod n) of
+        `PROVIDER_CALLBACK_URLS`, so which replica sees which copy is fixed
+        rather than lucky.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [times]
+              properties:
+                times: { type: integer, minimum: 1 }
+                as:
+                  type: string
+                  enum: [queued, forged, simulated, wrong_amount, return_code]
+                  default: queued
+                  description: >
+                    `forged` signs with a key this provider never issued;
+                    `simulated` sets `SimulatePaid=1`; `wrong_amount` sends a
+                    `TradeAmt` that is not the order's; `return_code` sends the
+                    `rtn_code` below instead of what the card implied.
+                rtn_code:
+                  type: string
+                  description: "Used with the `return_code` variant."
+                  example: "10300066"
+      responses:
+        "200":
+          description: What paygate answered each delivery
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deliveries]
+                properties:
+                  deliveries: { type: array, items: { $ref: "#/components/schemas/DeliveredCallback" } }
+
+  /__control/query:
+    post:
+      operationId: armNextQueryAnswer
+      summary: Decide what the next QueryTradeInfo will say
+      tags: [Control]
+      description: >
+        The interesting reconciliation cases are the ones where the callback never
+        arrived, and they are only interesting because the provider knows
+        something paygate does not. A scenario states that knowledge here — or
+        states that the next answer will be unusable, which paygate must treat as
+        no answer at all. Affects the next query only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                trade_status:
+                  type: string
+                  enum: ["0", "1", "10200095"]
+                  description: The answer to give. Omit it when using `as`.
+                as:
+                  type: string
+                  enum: [forged, throttled]
+                  description: >
+                    Instead of an answer, one of the two ways an answer is
+                    worthless: `forged` signs the body with a key this provider
+                    never issued, `throttled` answers `403` the way the real one
+                    does to a caller that asks too often.
+      responses:
+        "200": { description: Armed }
+
+  /__control/queries:
+    get:
+      operationId: listQueriesReceived
+      summary: Every QueryTradeInfo paygate has sent
+      tags: [Control]
+      description: >
+        How a scenario asserts that paygate asked — and, more often, that it did
+        NOT ask yet, because asking too early is the mistake this endpoint exists
+        to catch.
+      responses:
+        "200":
+          description: The log
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [queries]
+                properties:
+                  queries:
+                    type: array
+                    items:
+                      type: object
+                      required: [provider_trade_no, signature_verified, answered]
+                      properties:
+                        provider_trade_no: { type: string }
+                        signature_verified: { type: boolean }
+                        answered: { type: string }
+
+  /__control/requests:
+    get:
+      operationId: listProviderRequests
+      summary: Everything paygate sent this provider
+      tags: [Control]
+      description: >
+        Charges (arrivals at the cashier) and refunds, with whether each one's
+        signature verified. It is how a scenario asserts "the provider was asked
+        exactly once" from the far side, instead of inferring it from paygate's
+        own rows.
+      responses:
+        "200":
+          description: The log
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [charges, refunds]
+                properties:
+                  charges:
+                    type: array
+                    items: { $ref: "#/components/schemas/RecordedRequest" }
+                  refunds:
+                    type: array
+                    items: { $ref: "#/components/schemas/RecordedRequest" }
+
+components:
+  schemas:
+
+    EcpayCheckoutForm:
+      type: object
+      description: >
+        ECPay's `AioCheckOut` parameters, as paygate's hand-off produces them —
+        the same set ECPay's own WooCommerce plugin sends, which is where this list
+        came from.
+
+        The pair that makes paygate a PLATFORM rather than the merchant of
+        record: `MerchantID` is the shop's own account at ECPay, `PlatformID` is
+        paygate's, and the `CheckMacValue` is made with the **platform's**
+        HashKey and HashIV — ECPay's documentation says: "when integrating as a
+        platform merchant, the CheckMacValue must be produced with the HashKey
+        and HashIV that belong to the PlatformID." One platform signs for many shops,
+        and each shop is paid into its own account.
+      required: [MerchantID, PlatformID, MerchantTradeNo, MerchantTradeDate, PaymentType, TotalAmount, TradeDesc, ItemName, ReturnURL, ClientBackURL, ChoosePayment, EncryptType, NeedExtraPaidInfo, CheckMacValue]
+      properties:
+        MerchantID:
+          type: string
+          description: The SHOP's account at ECPay, bound under the platform.
+          example: "2000132"
+        PlatformID:
+          type: string
+          description: paygate's platform code, whose key pair signed this form.
+          example: "3002607"
+        MerchantTradeNo:
+          type: string
+          pattern: "^[A-Za-z0-9]{1,20}$"
+          description: >
+            The attempt's number. Twenty characters, mixed alphanumerics only,
+            and never reused — a new one for every hand-off.
+        MerchantTradeDate: { type: string, example: "2026/09/21 14:03:11" }
+        PaymentType: { type: string, const: aio }
+        TotalAmount: { type: string }
+        TradeDesc: { type: string }
+        ItemName: { type: string }
+        ReturnURL: { type: string, description: The back channel, at paygate. }
+        ClientBackURL:
+          type: string
+          description: >
+            Where the customer is sent afterwards. It carries no result, which is
+            exactly why paygate uses it and not `OrderResultURL`.
+        ChoosePayment: { type: string, const: Credit }
+        EncryptType: { type: string, const: "1" }
+        NeedExtraPaidInfo:
+          type: string
+          const: "Y"
+          description: >
+            Without it the result notification carries no `card4no`, `eci` or
+            `auth_code`, and paygate would have nothing to show a customer about
+            the card they used.
+        CheckMacValue: { type: string }
+
+    NewebpayCheckoutForm:
+      type: object
+      required: [MerchantID, TradeInfo, TradeSha, Version]
+      properties:
+        MerchantID: { type: string }
+        TradeInfo: { type: string, description: AES-256-CBC over the parameter string. }
+        TradeSha: { type: string, description: SHA-256 over the ciphertext, wrapped in HashKey/HashIV. }
+        Version: { type: string, const: "2.0" }
+
+    CardForm:
+      type: object
+      description: >
+        The card. It exists in this file and nowhere else in the repository, and
+        the mock keeps only the brand and the last four after answering.
+      required: [providerTradeNo, card_number, card_expiry, card_cvc]
+      properties:
+        providerTradeNo: { type: string }
+        card_number: { type: string, pattern: "^[0-9]{12,19}$" }
+        card_expiry: { type: string, pattern: "^(0[1-9]|1[0-2])/[0-9]{2}$" }
+        card_cvc: { type: string, pattern: "^[0-9]{3,4}$" }
+
+    EcpayRefundRequest:
+      type: object
+      required: [MerchantID, MerchantTradeNo, TradeNo, Action, TotalAmount, RefundTradeNo, CheckMacValue]
+      properties:
+        MerchantID: { type: string }
+        MerchantTradeNo: { type: string }
+        TradeNo: { type: string }
+        Action: { type: string, const: R }
+        TotalAmount: { type: string }
+        RefundTradeNo:
+          type: string
+          description: paygate's own refund id. The deduplication key that makes a retry safe.
+        CheckMacValue: { type: string }
+
+    NewebpayRefundRequest:
+      type: object
+      required: [MerchantID_, PostData_]
+      properties:
+        MerchantID_: { type: string }
+        PostData_: { type: string, description: The refund parameters, encrypted. }
+
+    QueuedCallback:
+      type: object
+      required: [provider, provider_trade_no, event_id, rtn_code]
+      description: >
+        What the provider is holding. `rtn_code` is ECPay's own: `1` paid,
+        `10100058`/`10200163` declined, and whatever else it decides to send.
+      properties:
+        provider: { type: string, enum: [ecpay, newebpay] }
+        provider_trade_no: { type: string }
+        event_id: { type: string }
+        rtn_code: { type: string, example: "1" }
+        rtn_msg: { type: string }
+        simulate_paid: { type: string, enum: ["0", "1"], default: "0" }
+        trade_amt: { type: string }
+        card4no: { type: [string, "null"], pattern: "^[0-9]{4}$" }
+        card6no: { type: [string, "null"] }
+        eci: { type: [string, "null"], description: The 3-D Secure result. }
+        auth_code: { type: [string, "null"] }
+        failure_code: { type: [string, "null"] }
+
+    DeliveredCallback:
+      allOf:
+        - $ref: "#/components/schemas/QueuedCallback"
+        - type: object
+          required: [status, body, accepted]
+          properties:
+            status: { type: integer }
+            body: { type: string }
+            accepted:
+              type: boolean
+              description: >
+                Whether the body was exactly `1|OK`. A delivery that was not
+                accepted is queued again — which is the mechanism paygate's
+                `webhooks.feature` leans on.
+
+    RecordedRequest:
+      type: object
+      required: [provider, provider_trade_no, signature_verified]
+      properties:
+        provider: { type: string, enum: [ecpay, newebpay] }
+        provider_trade_no: { type: string }
+        amount: { type: [integer, "null"] }
+        refund_trade_no: { type: [string, "null"] }
+        signature_verified:
+          type: boolean
+          description: >
+            False for a request the provider refused. A scenario that tampers
+            with a form asserts the refusal here and in what the customer saw.
+        deduplicated:
+          type: boolean
+          description: A refund whose `RefundTradeNo` had been seen before.
