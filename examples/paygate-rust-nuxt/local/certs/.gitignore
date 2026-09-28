@@ -1,0 +1,6 @@
+# The certificate and its private key are generated, never committed:
+# a private key does not belong in a repository, mkcert's CA name carries the
+# machine and account that made it, and a committed certificate expires
+# silently. Run ./generate.sh — the e2e suite also runs it for you.
+cert.pem
+key.pem

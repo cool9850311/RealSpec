@@ -95,6 +95,36 @@ paths:
             text/html:
               schema: { type: string }
 
+  /newebpay/Cashier/Card:
+    post:
+      operationId: newebpaySubmitCard
+      summary: The card, typed at the provider — NewebPay's origin
+      tags: [NewebPay]
+      description: |
+        The same form as ECPay's below, at NewebPay's own path. It is a separate
+        path rather than a shared one because a cashier's card form posts to the
+        origin the customer is already on: a browser that arrived at NewebPay's
+        gateway must not be sent to ECPay's to type its number, and the two
+        cashiers are two counterparties even when one process is standing in for
+        both.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/CardForm" }
+      responses:
+        "303":
+          description: On to the issuing bank
+          headers:
+            Location:
+              description: The issuer's 3-D Secure page, `/provider/issuer/3ds/{attempt}`.
+              schema: { type: string }
+        "400":
+          description: The provider refused the card before the issuer ever saw it
+          content:
+            text/html:
+              schema: { type: string }
+
   /ecpay/Cashier/Card:
     post:
       operationId: ecpaySubmitCard
@@ -278,6 +308,45 @@ paths:
             text/plain:
               schema: { type: string }
 
+  /newebpay/API/QueryTradeInfo:
+    post:
+      operationId: newebpayQueryTradeInfo
+      summary: Ask what became of an order — NewebPay's shape
+      tags: [NewebPay]
+      description: >
+        The same recovery path as ECPay's above, at the path every fixture seeds
+        into `providers.query_url` for NewebPay. It has to exist for the same
+        reason the cashier does: the reconciler asks whichever provider the
+        merchant is routed to, and a merchant on NewebPay whose callback was lost
+        would otherwise have nowhere for the question to go. The answer is a
+        signed `key=value&…` string, verified before it is believed, and asking
+        too fast earns the same `403` and the same silence.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [MerchantID, MerchantOrderNo, TimeStamp, CheckValue]
+              properties:
+                MerchantID: { type: string, description: The SHOP's account, as on the hand-off. }
+                MerchantOrderNo: { type: string }
+                TimeStamp: { type: string, description: Unix seconds. Valid for three minutes. }
+                CheckValue: { type: string }
+      responses:
+        "200":
+          description: >
+            `key=value&key=value…` as plain text. `TradeStatus` carries the same
+            three answers ECPay's does: `0`, `1`, `10200095`.
+          content:
+            text/plain:
+              schema: { type: string }
+        "403":
+          description: Queried too fast. The provider stops answering for 30 minutes.
+          content:
+            text/plain:
+              schema: { type: string }
+
   /newebpay/MPG/mpg_gateway:
     post:
       operationId: newebpayCashier
@@ -326,6 +395,19 @@ paths:
       responses:
         "200":
           description: The result, encrypted
+          content:
+            application/json:
+              schema: { type: object }
+        "400":
+          description: The request was not signed with the pair this provider issued the platform.
+          content:
+            application/json:
+              schema: { type: object }
+        "503":
+          description: >
+            The provider refused service. Same amounts, same meanings as ECPay's
+            `DoAction` above — the refund behaviour is one behaviour with two sets
+            of parameter names, so it answers with one set of statuses.
           content:
             application/json:
               schema: { type: object }
@@ -606,7 +688,15 @@ components:
         - type: object
           required: [status, body, accepted]
           properties:
-            status: { type: integer }
+            status:
+              type: [integer, "null"]
+              description: >
+                The status paygate answered with — or `null` when the delivery
+                could not be made at all, because the process was gone. That is
+                recorded as a refusal with no status rather than as an error: a
+                payment that is lost because nobody was listening is the failure
+                this whole arrangement exists to rule out, so it has to be a fact
+                the log can carry.
             body: { type: string }
             accepted:
               type: boolean

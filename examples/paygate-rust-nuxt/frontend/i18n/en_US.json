@@ -1,0 +1,50 @@
+{
+  "app": {
+    "name": "paygate"
+  },
+  "nav": {
+    "signOut": "Sign out"
+  },
+  "auth": {
+    "email": "Email",
+    "password": "Password",
+    "signIn": "Sign in",
+    "invalidCredentials": "Incorrect email or password.",
+    "unexpectedError": "Sign-in failed. Please try again."
+  },
+  "reports": {
+    "title": "Daily report",
+    "from": "From",
+    "to": "To",
+    "apply": "Apply",
+    "unavailable": "The report is temporarily unavailable. Please try again.",
+    "loading": "Loading the report…",
+    "columnDate": "Date",
+    "columnSucceeded": "Succeeded",
+    "columnFailed": "Failed",
+    "columnGross": "Gross",
+    "columnRefunded": "Refunded",
+    "columnNet": "Net",
+    "columnSuccessRate": "Success rate",
+    "totalsLabel": "Total"
+  },
+  "shop": {
+    "brand": "Acme Coffee",
+    "amount": "Amount",
+    "checkout": "Checkout",
+    "checkoutError": "Could not start checkout. Please try again.",
+    "payTitle": "Complete your payment",
+    "merchant": "Merchant",
+    "amountLabel": "Amount",
+    "orderNumber": "Order number",
+    "pay": "Pay",
+    "payAgain": "Pay again",
+    "payFormError": "This order's payment form could not be loaded.",
+    "resultTitle": "Order status",
+    "resultNotFound": "Nothing to show here. Start a new purchase from the shop.",
+    "resultAwaiting": "Awaiting payment",
+    "resultPaid": "Paid",
+    "resultRefunded": "Refunded",
+    "resultFailed": "Payment failed"
+  }
+}

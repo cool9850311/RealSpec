@@ -427,3 +427,287 @@ Feature: Asking the provider instead of guessing
       """
     When background work has settled
     Then merchant received 1 notification at "/demo-merchant/api/notify"
+
+  Scenario: A second charge nobody told paygate about is found by asking, and given back
+    # Every duplicate in duplicate_payment.feature announces itself with a second
+    # callback. This is the same duplicate with the announcement lost, which is
+    # the case that actually needs a reconciler: the only way this charge is ever
+    # found is paygate asking about an attempt nobody closed, and being told the
+    # money moved. Finding it and then doing nothing would be worse than never
+    # asking — the customer is charged twice AND there is a row proving paygate
+    # knew.
+    # The merchant's page is rendered a second time while the order is still
+    # payable, which is the only time it can be (handoff.feature, "A paid order
+    # is not handed over again"). That second form is the one the customer uses
+    # at the provider and about which NOTHING comes back — no callback, no
+    # redirect, nothing but an attempt left open.
+    When the payment form is submitted to the payment provider
+    Then response status is 200
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payment_attempts
+       WHERE payment_id = '{paymentId}' AND status = 'redirected'
+      HAVING count(*) = 2 AND count(DISTINCT provider_trade_no) = 2;
+      """
+    # The FIRST attempt's callback does arrive, and settles the order honestly.
+    When payment provider delivers each pending callback 1 time
+    Then exactly 1 callback was acknowledged
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payments
+       WHERE id = '{paymentId}' AND status = 'succeeded' AND amount_refunded = 0;
+      """
+    Given in PostgreSQL:
+      """sql
+      UPDATE payment_attempts SET started_at = NOW() - INTERVAL '61 minutes'
+       WHERE payment_id = '{paymentId}' AND status = 'redirected';
+      """
+    And payment provider answers the next query with trade status "1"
+    When the reconciler runs
+    # Recorded exactly as a callback-announced duplicate is, and against the same
+    # attempt: the order is settled once, for what it cost, and the second charge
+    # was never this order's money.
+    Then in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payment_events
+       WHERE payment_id = '{paymentId}' AND event_type = 'PaymentDuplicatePaid'
+      HAVING count(*) = 1;
+      """
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payments
+       WHERE id = '{paymentId}' AND status = 'succeeded' AND amount_refunded = 0;
+      """
+    # And given back, against the second attempt's own provider trade number —
+    # the reconciler queues the refund `pending` and its own second job sends it,
+    # which is the same machinery a duplicate refund that failed goes through
+    # (duplicate_payment.feature, "sent again, and lands once").
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM refunds r
+        JOIN payment_attempts a ON a.id = r.attempt_id
+       WHERE r.payment_id = '{paymentId}'
+         AND r.reason = 'duplicate'
+         AND r.status = 'succeeded'
+         AND r.amount = 2500
+         AND a.status = 'succeeded'
+      HAVING count(*) = 1;
+      """
+    And payment provider received 1 refund request
+    # Told once, about the payment. A merchant told about the duplicate would
+    # ship twice, and the duplicate is paygate's problem with the provider.
+    When background work has settled
+    Then merchant received 1 notification at "/demo-merchant/api/notify"
+
+  Scenario: With automatic refunds switched off, a duplicate found by asking is still recorded
+    # The same preference the callback path reads (duplicate_payment.feature,
+    # "With automatic refunds switched off"). Which of the two found the charge
+    # cannot be what decides whether the merchant's choice is honoured.
+    Given in PostgreSQL:
+      """sql
+      UPDATE merchants SET duplicate_auto_refund = false WHERE id = 1;
+      """
+    When the payment form is submitted to the payment provider
+    Then response status is 200
+    When payment provider delivers each pending callback 1 time
+    Then exactly 1 callback was acknowledged
+    Given in PostgreSQL:
+      """sql
+      UPDATE payment_attempts SET started_at = NOW() - INTERVAL '61 minutes'
+       WHERE payment_id = '{paymentId}' AND status = 'redirected';
+      """
+    And payment provider answers the next query with trade status "1"
+    When the reconciler runs
+    # The fact is written whatever the setting says. What the setting decides is
+    # only who gives the money back.
+    Then in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payment_events
+       WHERE payment_id = '{paymentId}' AND event_type = 'PaymentDuplicatePaid'
+      HAVING count(*) = 1;
+      """
+    And in PostgreSQL query returns 0 rows:
+      """sql
+      SELECT 1 FROM refunds;
+      """
+    And payment provider received 0 refund requests
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payments
+       WHERE id = '{paymentId}' AND status = 'succeeded' AND amount_refunded = 0;
+      """
+
+  Scenario: The lost callback turns up while the merchant is refunding, and both are honoured
+    # Two commands need the same two rows here — the order's and the attempt's —
+    # and they reach them from opposite ends: a refund starts from the order, a
+    # callback starts from the provider's trade number and has to find the order
+    # it belongs to. Taken in two different orders those two lock each other out
+    # (PostgreSQL's own `40P01`), and what a merchant would see is a refund that
+    # failed for no reason, or a callback the provider goes on resending because
+    # nobody ever answered it. Neither is allowed to happen, so this asks for
+    # both at one instant.
+    # The order settles by ASKING, which is what leaves the callback still
+    # queued at the provider: it was never delivered, so it is still owed.
+    Given in PostgreSQL:
+      """sql
+      UPDATE payment_attempts SET started_at = NOW() - INTERVAL '61 minutes'
+       WHERE payment_id = '{paymentId}';
+      """
+    And payment provider answers the next query with trade status "1"
+    When the reconciler runs
+    Then in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payments WHERE id = '{paymentId}' AND status = 'succeeded';
+      """
+    When these things happen at one instant:
+      """json
+      [
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "refund-vs-callback-1"
+          },
+          "body": { "amount": 1000 }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "refund-vs-callback-2"
+          },
+          "body": { "amount": 500 }
+        },
+        {"step": "payment provider delivers each pending callback 2 times"}
+      ]
+      """
+    # Four answers in one set: both refunds, and both copies of the callback.
+    Then exactly 2 responses are 201
+    And exactly 2 responses are 200
+    And exactly 2 callbacks were acknowledged
+    # The callback changed nothing — the query had already settled this order,
+    # and a second settlement is refused by the same `WHERE status = 'pending'`
+    # that refuses one callback racing another (webhooks.feature, "apply once").
+    # ONE row for two copies: they carry one event id, and `provider_events`'s
+    # own primary key is what makes a re-delivery a no-op that is still
+    # answered.
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM provider_events
+       WHERE payment_id = '{paymentId}' AND outcome = 'no_op' HAVING count(*) = 1;
+      """
+    # And both refunds are on the books, once each, for what was asked.
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM refunds
+       WHERE payment_id = '{paymentId}' AND status = 'succeeded'
+      HAVING count(*) = 2 AND sum(amount) = 1500;
+      """
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payments
+       WHERE id = '{paymentId}' AND status = 'succeeded' AND amount_refunded = 1500;
+      """
+    And payment provider received 2 refund requests
+
+  Scenario: A reconciliation pass and the duplicate's own callback reach the same attempt at once
+    # The pass holds its claim for as long as the provider takes to answer — a
+    # round trip, not an instant — and only then writes what the answer meant.
+    # If that claim were taken on the attempt rather than on the order, the
+    # callback for the SAME attempt, which takes the order first, would be
+    # holding exactly what the pass is about to want while waiting for exactly
+    # what the pass already holds. `888` is the amount whose query answer the
+    # provider holds for 800 ms, so this asks for that window on purpose rather
+    # than hoping for it.
+    # A second order, paid twice: the customer leaves the second payment page
+    # open, and uses it after the first payment has already settled the order —
+    # which is how a duplicate happens, and why neither the callback nor the
+    # pass can be the only one allowed to find it.
+    When POST /api/v1/payments:
+      """json
+      {
+        "headers": {
+          "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+          "Idempotency-Key": "recon-race-fixture"
+        },
+        "body": {
+          "merchant_trade_no": "ACME-RECON-RACE",
+          "amount": 888,
+          "currency": "USD",
+          "item_desc": "Beans",
+          "notify_url": "/demo-merchant/api/notify",
+          "client_back_url": "/shop/result"
+        }
+      }
+      """
+    Then response status is 201
+    And save response body field "id" as "slowId"
+    And the payment form is submitted to the payment provider
+    Then response status is 200
+    And the customer pays at the payment provider:
+      """json
+      {
+        "card_number": "4242424242424242",
+        "card_expiry": "12/30",
+        "card_cvc": "123"
+      }
+      """
+    Then response status is 303
+    # The second page is rendered while the order is still payable — the only
+    # time it can be — and left open.
+    And the payment form is submitted to the payment provider
+    Then response status is 200
+    # Both orders' first callbacks arrive and settle them.
+    When payment provider delivers each pending callback 1 time
+    Then exactly 2 callbacks were acknowledged
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payments WHERE id = '{slowId}' AND status = 'succeeded';
+      """
+    # Only now does the customer pay on the page they left open. Its callback is
+    # queued, and the attempt it belongs to is still outstanding.
+    When the customer pays at the payment provider:
+      """json
+      {
+        "card_number": "4242424242424242",
+        "card_expiry": "12/30",
+        "card_cvc": "123"
+      }
+      """
+    Then response status is 303
+    Given in PostgreSQL:
+      """sql
+      UPDATE payment_attempts SET started_at = NOW() - INTERVAL '61 minutes'
+       WHERE payment_id = '{slowId}' AND status = 'redirected';
+      """
+    And payment provider answers the next query with trade status "1"
+    When these things happen at one instant:
+      """json
+      [
+        {"step": "the reconciler runs"},
+        {"step": "payment provider delivers each pending callback 1 time"}
+      ]
+      """
+    # Whichever of the two got there first wrote it; the other found it written
+    # and did nothing, the same rule a callback racing a callback lives by.
+    Then exactly 1 callback was acknowledged
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payment_events
+       WHERE payment_id = '{slowId}' AND event_type = 'PaymentDuplicatePaid'
+      HAVING count(*) = 1;
+      """
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM refunds
+       WHERE payment_id = '{slowId}' AND reason = 'duplicate'
+      HAVING count(*) = 1;
+      """
+    # The order kept its own money: a duplicate's refund is not the order's.
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payments
+       WHERE id = '{slowId}' AND status = 'succeeded' AND amount_refunded = 0;
+      """

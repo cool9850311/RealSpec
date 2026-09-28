@@ -168,33 +168,117 @@ Feature: Per-merchant rate limits
       """
 
   Scenario Outline: Six simultaneous requests against a bucket of three let exactly three through
-    When GET /api/v1/health/ready is called concurrently:
+    When these things happen at one instant:
       """json
       [
-        { "body": {} },
-        { "body": {} },
-        { "body": {} },
-        { "body": {} },
-        { "body": {} },
-        { "body": {} }
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}}
       ]
       """
     Then exactly 6 responses are 200
-    When POST /api/v1/payments is called concurrently:
+    When these things happen at one instant:
       """json
       [
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "burst-<run>-1" },
-          "body": { "merchant_trade_no": "TN-BURST-<run>-1", "amount": 100, "currency": "USD", "item_desc": "Beans", "notify_url": "/demo-merchant/api/notify", "client_back_url": "/shop/result" } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "burst-<run>-2" },
-          "body": { "merchant_trade_no": "TN-BURST-<run>-2", "amount": 100, "currency": "USD", "item_desc": "Beans", "notify_url": "/demo-merchant/api/notify", "client_back_url": "/shop/result" } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "burst-<run>-3" },
-          "body": { "merchant_trade_no": "TN-BURST-<run>-3", "amount": 100, "currency": "USD", "item_desc": "Beans", "notify_url": "/demo-merchant/api/notify", "client_back_url": "/shop/result" } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "burst-<run>-4" },
-          "body": { "merchant_trade_no": "TN-BURST-<run>-4", "amount": 100, "currency": "USD", "item_desc": "Beans", "notify_url": "/demo-merchant/api/notify", "client_back_url": "/shop/result" } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "burst-<run>-5" },
-          "body": { "merchant_trade_no": "TN-BURST-<run>-5", "amount": 100, "currency": "USD", "item_desc": "Beans", "notify_url": "/demo-merchant/api/notify", "client_back_url": "/shop/result" } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "burst-<run>-6" },
-          "body": { "merchant_trade_no": "TN-BURST-<run>-6", "amount": 100, "currency": "USD", "item_desc": "Beans", "notify_url": "/demo-merchant/api/notify", "client_back_url": "/shop/result" } }
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-1"
+          },
+          "body": {
+            "merchant_trade_no": "TN-BURST-<run>-1",
+            "amount": 100,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-2"
+          },
+          "body": {
+            "merchant_trade_no": "TN-BURST-<run>-2",
+            "amount": 100,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-3"
+          },
+          "body": {
+            "merchant_trade_no": "TN-BURST-<run>-3",
+            "amount": 100,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-4"
+          },
+          "body": {
+            "merchant_trade_no": "TN-BURST-<run>-4",
+            "amount": 100,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-5"
+          },
+          "body": {
+            "merchant_trade_no": "TN-BURST-<run>-5",
+            "amount": 100,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-6"
+          },
+          "body": {
+            "merchant_trade_no": "TN-BURST-<run>-6",
+            "amount": 100,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        }
       ]
       """
     Then exactly 3 responses are 201

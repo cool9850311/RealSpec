@@ -250,26 +250,117 @@ Feature: The form that sends a customer to a provider
   Scenario Outline: Six servers asking for one order at one instant get six numbers and one order
     # A merchant's own retry loop, or six workers off one queue message. Every
     # number must be different and none of them may be an error.
-    When GET /api/v1/health/ready is called concurrently:
-      """json
-      [{}, {}, {}, {}, {}, {}]
-      """
-    Then exactly 6 responses are 200
-    When POST /api/v1/payments is called concurrently:
+    When these things happen at one instant:
       """json
       [
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "burst-<run>-1" },
-          "body": { "merchant_trade_no": "ACME-BURST-<run>", "amount": 1000, "currency": "USD", "item_desc": "Beans", "notify_url": "/demo-merchant/api/notify", "client_back_url": "/shop/result" } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "burst-<run>-2" },
-          "body": { "merchant_trade_no": "ACME-BURST-<run>", "amount": 1000, "currency": "USD", "item_desc": "Beans", "notify_url": "/demo-merchant/api/notify", "client_back_url": "/shop/result" } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "burst-<run>-3" },
-          "body": { "merchant_trade_no": "ACME-BURST-<run>", "amount": 1000, "currency": "USD", "item_desc": "Beans", "notify_url": "/demo-merchant/api/notify", "client_back_url": "/shop/result" } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "burst-<run>-4" },
-          "body": { "merchant_trade_no": "ACME-BURST-<run>", "amount": 1000, "currency": "USD", "item_desc": "Beans", "notify_url": "/demo-merchant/api/notify", "client_back_url": "/shop/result" } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "burst-<run>-5" },
-          "body": { "merchant_trade_no": "ACME-BURST-<run>", "amount": 1000, "currency": "USD", "item_desc": "Beans", "notify_url": "/demo-merchant/api/notify", "client_back_url": "/shop/result" } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "burst-<run>-6" },
-          "body": { "merchant_trade_no": "ACME-BURST-<run>", "amount": 1000, "currency": "USD", "item_desc": "Beans", "notify_url": "/demo-merchant/api/notify", "client_back_url": "/shop/result" } }
+        {"method": "GET", "path": "/api/v1/health/ready"},
+        {"method": "GET", "path": "/api/v1/health/ready"},
+        {"method": "GET", "path": "/api/v1/health/ready"},
+        {"method": "GET", "path": "/api/v1/health/ready"},
+        {"method": "GET", "path": "/api/v1/health/ready"},
+        {"method": "GET", "path": "/api/v1/health/ready"}
+      ]
+      """
+    Then exactly 6 responses are 200
+    When these things happen at one instant:
+      """json
+      [
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-1"
+          },
+          "body": {
+            "merchant_trade_no": "ACME-BURST-<run>",
+            "amount": 1000,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-2"
+          },
+          "body": {
+            "merchant_trade_no": "ACME-BURST-<run>",
+            "amount": 1000,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-3"
+          },
+          "body": {
+            "merchant_trade_no": "ACME-BURST-<run>",
+            "amount": 1000,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-4"
+          },
+          "body": {
+            "merchant_trade_no": "ACME-BURST-<run>",
+            "amount": 1000,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-5"
+          },
+          "body": {
+            "merchant_trade_no": "ACME-BURST-<run>",
+            "amount": 1000,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-6"
+          },
+          "body": {
+            "merchant_trade_no": "ACME-BURST-<run>",
+            "amount": 1000,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        }
       ]
       """
     Then exactly 6 responses are 201

@@ -1,0 +1,50 @@
+{
+  "app": {
+    "name": "paygate"
+  },
+  "nav": {
+    "signOut": "登出"
+  },
+  "auth": {
+    "email": "電子郵件",
+    "password": "密碼",
+    "signIn": "登入",
+    "invalidCredentials": "電子郵件或密碼不正確。",
+    "unexpectedError": "登入失敗，請再試一次。"
+  },
+  "reports": {
+    "title": "每日報表",
+    "from": "起始日",
+    "to": "結束日",
+    "apply": "套用",
+    "unavailable": "報表暫時無法使用，請再試一次。",
+    "loading": "報表載入中…",
+    "columnDate": "日期",
+    "columnSucceeded": "成功",
+    "columnFailed": "失敗",
+    "columnGross": "總額",
+    "columnRefunded": "退款",
+    "columnNet": "淨額",
+    "columnSuccessRate": "成功率",
+    "totalsLabel": "合計"
+  },
+  "shop": {
+    "brand": "Acme Coffee",
+    "amount": "金額",
+    "checkout": "結帳",
+    "checkoutError": "無法建立訂單，請再試一次。",
+    "payTitle": "完成付款",
+    "merchant": "商家",
+    "amountLabel": "金額",
+    "orderNumber": "訂單編號",
+    "pay": "付款",
+    "payAgain": "再次付款",
+    "payFormError": "無法載入此訂單的付款表單。",
+    "resultTitle": "訂單狀態",
+    "resultNotFound": "沒有可顯示的訂單，請從商店重新開始購買。",
+    "resultAwaiting": "等待付款",
+    "resultPaid": "已付款",
+    "resultRefunded": "已退款",
+    "resultFailed": "付款失敗"
+  }
+}

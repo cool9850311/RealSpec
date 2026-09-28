@@ -283,17 +283,25 @@ Feature: When the customer pays twice
       }
       """
     Then response status is 303
+    # Four, not two: the Background left its own order's two callbacks queued for
+    # a scenario to release, and this scenario has added two of its own. The step
+    # releases the whole queue — it is not scoped to one order, and it should not
+    # be, because a provider does not know which of its callbacks a test cares
+    # about. All four are honest reports of real payments, so all four are
+    # acknowledged.
     When payment provider delivers each pending callback 1 time
-    Then exactly 2 callbacks were acknowledged
+    Then exactly 4 callbacks were acknowledged
     And in PostgreSQL query returns 1 row:
       """sql
       SELECT 1 FROM payment_events
        WHERE payment_id = '{failRefundId}' AND event_type = 'PaymentDuplicatePaid' HAVING count(*) = 1;
       """
     When background work has settled
-    # The provider was asked, and it refused — exactly as it does for a
-    # merchant-initiated refund of 119 (refunds.feature).
-    Then payment provider received 1 refund request
+    # Two refunds were asked for, one per duplicated order: the Background's
+    # 2500, which the provider performs, and this order's 119, which it refuses —
+    # exactly as it refuses a merchant-initiated refund of 119
+    # (refunds.feature). What matters below is which of the two came back.
+    Then payment provider received 2 refund requests
     And in PostgreSQL query returns 0 rows:
       """sql
       SELECT 1 FROM refunds WHERE payment_id = '{failRefundId}' AND status = 'succeeded';

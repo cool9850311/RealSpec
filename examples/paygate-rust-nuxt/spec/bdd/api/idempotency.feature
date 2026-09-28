@@ -202,6 +202,52 @@ Feature: Idempotency keys
       SELECT 1 FROM payments WHERE id = '{paymentId}' AND amount_refunded = 1000;
       """
 
+  Scenario: A stored answer that is no longer an answer is a failure, not a replay
+    # A replay is only ever as good as what was stored, and this scenario
+    # corrupts what was stored — deliberately, because the alternative is to
+    # trust that nothing ever will. What makes it worth a scenario is which way
+    # the mistake goes: a status that cannot be parsed is not a neutral value,
+    # and the tempting default for it is `200`. A merchant told `422` the first
+    # time would then be told the opposite the second, about the same request.
+    When POST /api/v1/payments/{paymentId}/refunds:
+      """json
+      {
+        "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "corrupt-store-1" },
+        "body": { "amount": 1000 }
+      }
+      """
+    Then response status is 201
+    Given in PostgreSQL:
+      """sql
+      UPDATE idempotency_keys SET response_status = 1000
+       WHERE merchant_id = 1 AND idempotency_key = 'corrupt-store-1';
+      """
+    When POST /api/v1/payments/{paymentId}/refunds:
+      """json
+      {
+        "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "corrupt-store-1" },
+        "body": { "amount": 1000 }
+      }
+      """
+    Then response status is 500
+    And response body contains:
+      """json
+      {
+        "error": "INTERNAL"
+      }
+      """
+    # It fails, and it fails safely: the key is still spent, the refund still
+    # happened exactly once, and the provider was not asked again.
+    And payment provider received 1 refund request
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM refunds WHERE payment_id = '{paymentId}' HAVING count(*) = 1;
+      """
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payments WHERE id = '{paymentId}' AND amount_refunded = 1000;
+      """
+
   Scenario: Reusing a key for a different request is refused and leaves the first alone
     When POST /api/v1/payments/{paymentId}/refunds:
       """json
@@ -286,6 +332,20 @@ Feature: Idempotency keys
         ('01931c4f-0000-7000-8000-00000000000c', 2, 'GLOBEX-IDEM-1', 10000, 'EUR', 'succeeded', 'Widget',
          '/demo-merchant/api/notify', '/shop/result', 0);
       """
+    # A paid order is not refundable on its own: a refund goes to the provider
+    # against the trade number of the attempt that took the money (spec.md,
+    # "Refunds"), so a seeded order needs the attempt that paid it. The sibling
+    # scenario below seeds one; this one did not, and the refund was correctly
+    # refused with `PAYMENT_NOT_REFUNDABLE` before the idempotency scoping this
+    # scenario is about could be exercised at all.
+    And in PostgreSQL:
+      """sql
+      INSERT INTO payment_attempts
+        (id, payment_id, provider_code, provider_trade_no, status, provider_charge_id, started_at, settled_at)
+      VALUES
+        ('01931c4f-0000-7000-8000-00000000000f', '01931c4f-0000-7000-8000-00000000000c',
+         'newebpay', 'GLBX00000002SNc3d4', 'succeeded', 'ch_seeded_c', NOW(), NOW());
+      """
     When POST /api/v1/payments/{paymentId}/refunds:
       """json
       {
@@ -330,22 +390,39 @@ Feature: Idempotency keys
         ('01931c4f-0000-7000-8000-00000000000e', '01931c4f-0000-7000-8000-00000000000d',
          'newebpay', 'GLBX00000001SNa1b2', 'succeeded', 'ch_seeded_d', NOW(), NOW());
       """
-    When GET /api/v1/health/ready is called concurrently:
-      """json
-      [{}, {}]
-      """
-    Then exactly 2 responses are 200
-    When these requests are sent at one instant:
+    When these things happen at one instant:
       """json
       [
-        { "method": "POST",
+        {"method": "GET", "path": "/api/v1/health/ready"},
+        {"method": "GET", "path": "/api/v1/health/ready"}
+      ]
+      """
+    Then exactly 2 responses are 200
+    When these things happen at one instant:
+      """json
+      [
+        {
+          "method": "POST",
           "path": "/api/v1/payments/{paymentId}/refunds",
-          "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "same-key-two-shops" },
-          "body": { "amount": 1000 } },
-        { "method": "POST",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "same-key-two-shops"
+          },
+          "body": {
+            "amount": 1000
+          }
+        },
+        {
+          "method": "POST",
           "path": "/api/v1/payments/01931c4f-0000-7000-8000-00000000000d/refunds",
-          "headers": { "Authorization": "Bearer sk_test_globex_9kR2mQ7vX4pL8nT3wZ6yB1cF", "Idempotency-Key": "same-key-two-shops" },
-          "body": { "amount": 1000 } }
+          "headers": {
+            "Authorization": "Bearer sk_test_globex_9kR2mQ7vX4pL8nT3wZ6yB1cF",
+            "Idempotency-Key": "same-key-two-shops"
+          },
+          "body": {
+            "amount": 1000
+          }
+        }
       ]
       """
     Then exactly 2 responses are 201
@@ -373,9 +450,13 @@ Feature: Idempotency keys
       }
       """
     Then response status is 422
+    # Scoped to this scenario's own key. The Background created its order with
+    # `key-acme-idem-1`, and that key is legitimately still on the books as
+    # completed — replaying a successful answer is what it is for. What must not
+    # be here is the key of the request that was just refused.
     And in PostgreSQL query returns 0 rows:
       """sql
-      SELECT 1 FROM idempotency_keys;
+      SELECT 1 FROM idempotency_keys WHERE idempotency_key = 'fix-and-retry';
       """
     When POST /api/v1/payments/{paymentId}/refunds:
       """json
@@ -425,23 +506,63 @@ Feature: Idempotency keys
     # refused as IN_USE rather than, by luck of timing, replayed after it
     # finished. Without that window the race would still be safe, but its
     # outcome would not be exact, and an inexact outcome is not an assertion.
-    When GET /api/v1/health/ready is called concurrently:
+    When these things happen at one instant:
       """json
       [
-        { "body": {} },
-        { "body": {} },
-        { "body": {} },
-        { "body": {} }
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}}
       ]
       """
     Then exactly 4 responses are 200
-    When POST /api/v1/payments/{paymentId}/refunds is called concurrently:
+    When these things happen at one instant:
       """json
       [
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "race-key-<run>" }, "body": { "amount": 777 } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "race-key-<run>" }, "body": { "amount": 777 } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "race-key-<run>" }, "body": { "amount": 777 } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "race-key-<run>" }, "body": { "amount": 777 } }
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "race-key-<run>"
+          },
+          "body": {
+            "amount": 777
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "race-key-<run>"
+          },
+          "body": {
+            "amount": 777
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "race-key-<run>"
+          },
+          "body": {
+            "amount": 777
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "race-key-<run>"
+          },
+          "body": {
+            "amount": 777
+          }
+        }
       ]
       """
     Then exactly 1 response is 201

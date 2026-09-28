@@ -67,30 +67,161 @@ Feature: Horizontal scaling
       """
     Then response status is 201
     And save response body field "id" as "paymentId"
-    When GET /api/v1/health/ready is called concurrently:
+    # Warm every replica's pools first, so that the burst below races the three
+    # PROCESSES rather than three connection pools being opened for the first
+    # time (format.yml, `requests_concurrent`).
+    When these things happen at one instant:
       """json
       [
-        { "body": {} }, { "body": {} }, { "body": {} },
-        { "body": {} }, { "body": {} }, { "body": {} }
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}}
       ]
       """
     Then exactly 6 responses are 200
-    Then exactly 6 responses are 200
+    # And now the six browsers, at one instant, two per replica. Each carries its
+    # own Idempotency-Key, because the same key would be a retry of one request
+    # rather than six requests — the other half of "Two kinds of duplicate".
+    # Every one of them is answered `201` with the SAME order and a form of its
+    # own: that is the rule ECPay forces (spec.md, "One order, three numbers"),
+    # and the one whose insert loses the UNIQUE on (merchant_id,
+    # merchant_trade_no) must still answer with the order that won rather than
+    # with an error.
+    When these things happen at one instant:
+      """json
+      [
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-1"
+          },
+          "body": {
+            "merchant_trade_no": "ACME-SCALED-<run>",
+            "amount": 3000,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-2"
+          },
+          "body": {
+            "merchant_trade_no": "ACME-SCALED-<run>",
+            "amount": 3000,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-3"
+          },
+          "body": {
+            "merchant_trade_no": "ACME-SCALED-<run>",
+            "amount": 3000,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-4"
+          },
+          "body": {
+            "merchant_trade_no": "ACME-SCALED-<run>",
+            "amount": 3000,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-5"
+          },
+          "body": {
+            "merchant_trade_no": "ACME-SCALED-<run>",
+            "amount": 3000,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "burst-<run>-6"
+          },
+          "body": {
+            "merchant_trade_no": "ACME-SCALED-<run>",
+            "amount": 3000,
+            "currency": "USD",
+            "item_desc": "Beans",
+            "notify_url": "/demo-merchant/api/notify",
+            "client_back_url": "/shop/result"
+          }
+        }
+      ]
+      """
+    Then exactly 6 responses are 201
+    # Seven forms in total — the merchant's first render, and the six browsers —
+    # and no two of them carry the same number. That is the generator's only real
+    # test, because it is the only place three processes mint at once.
     And in PostgreSQL query returns 1 row:
       """sql
       SELECT 1 FROM payment_attempts
        WHERE payment_id = '{paymentId}'
-      HAVING count(*) = 6 AND count(DISTINCT provider_trade_no) = 6;
+      HAVING count(*) = 7 AND count(DISTINCT provider_trade_no) = 7;
       """
     And in PostgreSQL query returns 1 row:
       """sql
       SELECT 1 FROM payment_events
        WHERE payment_id = '{paymentId}' AND event_type = 'PaymentAttemptStarted'
-      HAVING count(*) = 6;
+      HAVING count(*) = 7;
       """
-    # Six numbers were minted by three processes and none collided — the
-    # generator's only real test. Paying with the last one settles the order
-    # once, and the five unused ones are cleaned up by the reconciler later.
+    # One order, though: six concurrent callers created no second one.
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payments WHERE merchant_trade_no = 'ACME-SCALED-<run>'
+      HAVING count(*) = 1;
+      """
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payment_events
+       WHERE payment_id = '{paymentId}' AND event_type = 'PaymentCreated'
+      HAVING count(*) = 1;
+      """
+    # Paying with the first form settles the order once; the six unused numbers
+    # are live orders at the provider that nobody paid, and the reconciler ends
+    # them later on the provider's word (reconcile.feature).
     When the payment form is submitted to the payment provider
     Then response status is 200
     And the customer pays at the payment provider:
@@ -159,23 +290,87 @@ Feature: Horizontal scaling
     Then response status is 303
     When payment provider delivers each pending callback 1 time
     Then exactly 1 response is 200
-    When GET /api/v1/health/ready is called concurrently:
+    When these things happen at one instant:
       """json
       [
-        { "body": {} }, { "body": {} }, { "body": {} },
-        { "body": {} }, { "body": {} }, { "body": {} }
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}}
       ]
       """
     Then exactly 6 responses are 200
-    When POST /api/v1/payments/{paymentId}/refunds is called concurrently:
+    When these things happen at one instant:
       """json
       [
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "sref-<run>-a" }, "body": { "amount": 3000 } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "sref-<run>-b" }, "body": { "amount": 3000 } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "sref-<run>-c" }, "body": { "amount": 3000 } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "sref-<run>-d" }, "body": { "amount": 3000 } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "sref-<run>-e" }, "body": { "amount": 3000 } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "sref-<run>-f" }, "body": { "amount": 3000 } }
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "sref-<run>-a"
+          },
+          "body": {
+            "amount": 3000
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "sref-<run>-b"
+          },
+          "body": {
+            "amount": 3000
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "sref-<run>-c"
+          },
+          "body": {
+            "amount": 3000
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "sref-<run>-d"
+          },
+          "body": {
+            "amount": 3000
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "sref-<run>-e"
+          },
+          "body": {
+            "amount": 3000
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "sref-<run>-f"
+          },
+          "body": {
+            "amount": 3000
+          }
+        }
       ]
       """
     Then exactly 3 responses are 201
@@ -227,11 +422,15 @@ Feature: Horizontal scaling
       }
       """
     Then response status is 303
-    When GET /api/v1/health/ready is called concurrently:
+    When these things happen at one instant:
       """json
       [
-        { "body": {} }, { "body": {} }, { "body": {} },
-        { "body": {} }, { "body": {} }, { "body": {} }
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}}
       ]
       """
     Then exactly 6 responses are 200
@@ -502,16 +701,23 @@ Feature: Horizontal scaling
     # from ClickHouse, whose background merges could hide a duplicate. The
     # ingester_id column is written by each ingester from its own instance id;
     # two distinct values prove the consumer group really split the partitions.
+    # `gen_random_uuid()` is called in the select list, not through a
+    # `LATERAL (SELECT gen_random_uuid())`. A lateral subquery that does not
+    # reference the outer relation is flattened by the planner and evaluated
+    # ONCE: three hundred rows then share one id and the insert dies on
+    # `payment_events_event_id_key`. Verified on PostgreSQL 17 —
+    # `count(DISTINCT e.event_id)` over that shape is 1.
     Given in PostgreSQL:
       """sql
       INSERT INTO payment_events (event_id, payment_id, seq, merchant_id, event_type, payload, occurred_at)
-      SELECT e.event_id, e.payment_id, 1, 1, 'PaymentCreated',
+      SELECT gen_random_uuid(), gen_random_uuid(), 1, 1, 'PaymentCreated',
              jsonb_build_object('amount', 100, 'currency', 'USD', 'card_brand', 'visa',
                                 'reference', 'bulk-' || n),
              TIMESTAMPTZ '2026-09-10T02:00:00Z' + (n * INTERVAL '1 second')
-        FROM generate_series(1, 300) AS n,
-             LATERAL (SELECT gen_random_uuid() AS event_id, gen_random_uuid() AS payment_id) AS e;
+        FROM generate_series(1, 300) AS n;
       """
+    # Scoped to the rows above by their reference, so the pair count is exactly
+    # six hundred whatever else the scenario's database may hold.
     And in PostgreSQL:
       """sql
       INSERT INTO payment_events (event_id, payment_id, seq, merchant_id, event_type, payload, occurred_at)
@@ -521,7 +727,8 @@ Feature: Horizontal scaling
                                 'provider_charge_id', 'ch_bulk', 'source', 'callback'),
              i.occurred_at + INTERVAL '1 millisecond'
         FROM payment_events i
-       WHERE i.event_type = 'PaymentCreated';
+       WHERE i.event_type = 'PaymentCreated'
+         AND i.payload->>'reference' LIKE 'bulk-%';
       """
     When background work has settled
     Then in ClickHouse query returns 1 row:

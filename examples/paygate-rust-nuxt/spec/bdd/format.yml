@@ -8,7 +8,7 @@
 # postgresql_query_returns, background_work_settled, clickhouse_query_returns,
 # projection_rebuilt, payment_provider_received, merchant_received — so an API
 # Background and an e2e Background seed and assert with byte-identical text.
-# Thirteen more are API-only and fourteen are e2e-only.
+# Sixteen more are API-only and fourteen are e2e-only, making thirty-eight.
 #
 # A note on history: this vocabulary was written while paygate was event
 # sourced, and it has survived three further rewrites of the design — back to
@@ -132,18 +132,23 @@
 #
 # ── Concurrency ──────────────────────────────────────────────────────────────
 #
-# `… is called concurrently:` fires an array of envelopes at one instant;
-# `exactly <n> responses are <status>` asserts the set they came back as. The
-# webhook step records its deliveries as the same kind of set, so one assertion
-# reads both. The set and the single response exclude each other: a step that
-# records one clears the other, and an assertion that reads the wrong one fails
-# saying so.
+# `these things happen at one instant:` releases an array of actors together;
+# `exactly <n> responses are <status>` asserts the set they answered with. An
+# actor is an HTTP caller of the service, or the sentence of a step this
+# registry already declares (`step_ref`) — which is the only way the things
+# that are NOT callers of this service can take part in a race: a provider's
+# signed callback, and a worker's own pass. The webhook step records its
+# deliveries as the same kind of set, so one assertion reads both, and a race
+# that contains one records the union. The set and the single response exclude
+# each other: a step that records one clears the other, and an assertion that
+# reads the wrong one fails saying so.
 #
 # Under `@stack:scaled` there are several API replicas and the harness spreads
 # work across them by a FIXED rule, never by chance (spec.md, "Scaling"):
-# single requests go round-robin in the order the scenario sends them, caller i
-# of a concurrent step goes to replica (i mod N), and webhook delivery i goes to
-# replica (i mod N). Every race in scaling.feature is therefore a race between
+# single requests go round-robin in the order the scenario sends them, the i-th
+# REQUEST of a concurrent step goes to replica (i mod N) — an actor that is not
+# a caller of this service takes no turn in that rotation — and webhook delivery
+# i goes to replica (i mod N). Every race in scaling.feature is therefore a race between
 # processes, reproducibly.
 #
 # ── What this registry deliberately does not contain ─────────────────────────
@@ -265,66 +270,65 @@ steps:
       model, so a scenario puts `projections have caught up` before it unless
       being behind is what it is testing.
 
-  - id: http_request_concurrent
-    keywords: [When]
-    pattern: "^(GET|POST|PUT|PATCH|DELETE) (/api/v1/[a-zA-Z0-9/{}:._?=&%-]+) is called concurrently:$"
-    captures:
-      - name: method
-        pattern: "GET|POST|PUT|PATCH|DELETE"
-        description: HTTP method (uppercase); the same for every caller.
-      - name: path
-        pattern: "/api/v1/[a-zA-Z0-9/{}:._?=&%-]+"
-        description: Absolute API path; the same for every caller.
-    docstring:
-      type: json
-      schema:
-        "[]":
-          required: true
-          description: >
-            A JSON ARRAY of the envelopes http_request takes — "headers" and
-            "body", both optional, no other key. One element is one caller. At
-            least two elements.
-      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
-    description: >
-      Opens one connection per caller, builds every request, parks every caller
-      at a gate, and releases them together onto a single write each — the
-      closest a race can be arranged from outside the service. Under
-      @stack:scaled caller i (0-based) is connected to replica (i mod N) + 1, so
-      a burst of six against three replicas is two callers per process.
-      Every rule of http_request holds per element. A transport failure by any
-      caller fails the step, naming which. The service is not warmed by this
-      step: a scenario whose race must be real fires a concurrent read first
-      (GET /api/v1/health/ready, which touches PostgreSQL and Redis) and says
-      why. Records a SET of responses — read only by response_set_status_count —
-      and clears the single response.
-
   - id: requests_concurrent
     keywords: [When]
-    pattern: "^these requests are sent at one instant:$"
+    pattern: "^these things happen at one instant:$"
     docstring:
       type: json
       schema:
         "[]":
           required: true
           description: >
-            A JSON ARRAY of envelopes, each carrying its own "method" and "path"
-            as well as the optional "headers" and "body" http_request takes. One
-            element is one caller. At least two.
+            A JSON ARRAY of actors, at least two. One element is one actor, and
+            an element is EITHER an envelope carrying its own "method" and
+            "path" as well as the optional "headers" and "body" http_request
+            takes — a caller of this scenario's service — OR {"step": "<the
+            sentence of a step in this registry>"}, which is anything else this
+            registry can already do.
+            A named step must be one this registry declares with `When` and with
+            no docstring of its own: an action, with no body to carry. That rule
+            is what keeps this closed — the set of things nameable here is
+            exactly the registry — and it excludes this step from naming itself,
+            because this step has a docstring.
       content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+    step_ref:
+      key: step
+      keywords: [When]
+      docstring: none
     description: >
-      http_request_concurrent's arrangement without its one restriction: every
-      caller may address a DIFFERENT endpoint. Use it when the race is between
-      unlike requests — two merchants spending the same idempotency key on their
-      own orders, a refund arriving while the same payment is being read — and use
-      http_request_concurrent when the point is one endpoint being hammered, which
-      is the commoner case and reads better for it.
+      The one way this registry arranges a race, whether the actors are HTTP
+      callers addressing the same endpoint or different ones, or things this
+      registry does by other means entirely. It builds every actor, parks them
+      all at a gate, and releases them together — an HTTP caller onto a single
+      write, a named step onto its own first effect — which is the closest a
+      race can be arranged from outside the service.
+      A named step is not a second way to do what an envelope does: it is the
+      only way to race the actors that are NOT callers of this service, and
+      there are two that matter. A provider's callback is one, because a
+      signature is a field of the form the provider posts and no step of this
+      registry sends one — only the mock may sign, which is what makes every
+      "paygate verified it" assertion mean anything. A worker's own pass is the
+      other, because `the reconciler runs` is a one-shot command rather than a
+      wait. Without this, neither could ever be shown to hold while the merchant
+      API is being used at the same instant, which is exactly when they are
+      hardest to get right.
+      There was once a second, narrower form as well (`<METHOD> <path> is called
+      concurrently:`, whose callers all shared one endpoint). It was removed: it
+      could express nothing this one cannot, and a registry that offers two ways
+      to say one thing makes every reader decide which they are looking at. Six
+      callers hammering one endpoint is simply six envelopes naming the same path,
+      which is a little more to write and exactly as much to understand.
       Every rule of http_request holds per element, including that each path must
-      exist in spec/openapi/openapi.yaml. Callers are built, parked at a gate and
-      released together; under @stack:scaled caller i (0-based) goes to replica
-      (i mod N) + 1, exactly as in the fixed-path form. Records a SET of responses
-      — read only by response_set_status_count — and clears the single response.
-
-  # ── API: What the merchant does with the form ────────────────────────────────
+      exist in the OpenAPI document and that {camelCase} segments are substituted
+      from the scenario's context. No element may save a context variable: what
+      a race produces is read afterwards, by the assertions.
+      The responses are recorded as a SET, in element order — the union of what
+      every actor produced, so an envelope's own response and the answers a named
+      step collected (a delivered callback's, for instance) are counted by the
+      same `exactly <n> responses are <status>` that reads any other set. An
+      actor that produces no response at all, such as a reconciliation pass,
+      contributes nothing to it and fails the step if it fails. The single
+      recorded response is cleared.
 
   - id: payment_form_submitted
     keywords: [When, And]
@@ -411,8 +415,8 @@ steps:
     docstring: ~
     description: >
       Asserts how many responses of the last recorded SET carried this status —
-      the set recorded by http_request_concurrent or by
-      payment_provider_delivers_webhooks. EXACT, never "at least": "one of six
+      the set recorded by requests_concurrent (every actor's answers, in element
+      order) or by provider_delivers_callbacks. EXACT, never "at least": "one of six
       callers was charged" is the whole claim a race makes. Fails printing the
       observed distribution with one body per status. Fails if no set has been
       recorded.
@@ -1052,31 +1056,6 @@ steps:
       that let an empty table pass as a populated one, and it is not expressible
       here. 0 is a legitimate expectation and asserts the list is empty.
       Fails reporting the expected and the last observed count.
-
-  - id: row_contains
-    keywords: [Then, And]
-    pattern: "^row (\\d+) of \"((?:button|link|heading|textbox|checkbox|radio|combobox|option|listitem|row|cell|columnheader|table|list|img|dialog|alert|status|navigation|banner|main|region|form|tab|tabpanel|menuitem|progressbar|paragraph|article|group|search|switch|slider|spinbutton|separator|tooltip|treeitem):(?:@[a-z][a-zA-Z0-9]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+|[^\"]+)|testid:[a-z][a-z0-9-]*(?:\\{[a-z][a-zA-Z0-9]*\\}[a-z0-9-]*)?)\" contains:$"
-    captures:
-      - name: index
-        pattern: "\\d+"
-        description: 1-based row index in document order.
-      - name: locator
-        description: Locator token matching every row of the list.
-    docstring:
-      type: json
-      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
-      special_values:
-        - token: "\"<non-null>\""
-          description: Element exists within the row and its normalised text is non-empty.
-        - token: "\"{[a-z][a-zA-Z0-9]+}\""
-          description: Context variable resolved before comparison.
-        - token: "\"<outlineParam>\""
-          description: Scenario Outline parameter substituted from the Examples table.
-    description: >
-      Identical to region_contains, except the region is the Nth element
-      matching the row locator instead of a single named container.
-      Fails if fewer than `index` rows exist, reporting how many there are, so
-      an off-by-one is never reported as a missing key.
 
   - id: network_request_responded
     keywords: [Then, And]

@@ -147,11 +147,13 @@ Feature: Reporting, and the projections that feed it
       }
       """
     Then response status is 303
-    # Two attempts are now waiting on the provider: the second order's, which
-    # will be approved, and the third's, which will be declined. Neither is
-    # decided until the callback arrives.
+    # One attempt is waiting: this third order's, which will be declined. The
+    # first two orders' callbacks were each released as they were made, above.
+    # A decline is still acknowledged — `1|OK` says "I have taken responsibility
+    # for this outcome", not "the card worked" — so the answer is `200`
+    # (spec.md, "Being told by the provider").
     When payment provider delivers each pending callback 1 time
-    Then exactly 2 responses are 200
+    Then exactly 1 response is 200
     When POST /api/v1/payments/{live1Id}/refunds:
       """json
       {
@@ -616,9 +618,13 @@ Feature: Reporting, and the projections that feed it
     Then response status is 303
     When payment provider delivers each pending callback 1 time
     Then exactly 1 response is 200
+    # Six, not four: a paid order writes three audit rows — `PaymentCreated`,
+    # `PaymentAttemptStarted` and `PaymentSucceeded` (spec.md, "Events") — and
+    # there are two orders. Only two of the six are projected to the report, but
+    # the relay publishes every row, so every row is waiting.
     And in PostgreSQL query returns 1 row:
       """sql
-      SELECT 1 FROM payment_events WHERE published_at IS NULL HAVING count(*) = 4;
+      SELECT 1 FROM payment_events WHERE published_at IS NULL HAVING count(*) = 6;
       """
     When service "relay" is started
     And background work has settled

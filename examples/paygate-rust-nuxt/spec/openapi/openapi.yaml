@@ -55,6 +55,7 @@ info:
     | First use | processed; the status and body are stored for 24 hours |
     | Same key, same request, answered | the stored answer, with `Idempotent-Replayed: true` |
     | Same key, same request, running | `409 IDEMPOTENCY_KEY_IN_USE` |
+    | Same key, same request, answered, but the stored answer is no longer usable | `500 INTERNAL` — a stored status that is not a status is a failure, not a licence to replay it as a success |
     | Same key, different request | `422 IDEMPOTENCY_KEY_REUSED` |
 
     Answers produced before processing starts — authentication, rate limiting,
@@ -161,6 +162,7 @@ paths:
                   - $ref: "#/components/schemas/ValidationError"
                   - $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
 
     get:
       operationId: findOrderByTradeNo
@@ -261,6 +263,7 @@ paths:
                   - $ref: "#/components/schemas/RefundExceedsRemaining"
                   - $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
         "502":
           description: The provider refused service; nothing was refunded or recorded.
           content:
@@ -643,6 +646,16 @@ components:
       description: The merchant's rate limit is exhausted
       headers:
         Retry-After: { $ref: "#/components/headers/RetryAfter" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Internal:
+      description: >
+        `INTERNAL`. Nothing a caller can fix, and nothing this gateway will
+        guess at: the one reachable case is an idempotency record whose stored
+        answer can no longer be replayed faithfully — a status that is not a
+        status — which is answered as the failure it is rather than replayed as
+        a success (spec.md, *Two kinds of duplicate*).
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

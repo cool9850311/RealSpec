@@ -268,6 +268,16 @@ red warning and a "mark as handled" button and leaves the refund to a human.
 per merchant — some will want to look at it themselves — and
 `duplicate_payment.feature` asserts both settings.
 
+**However the second charge is discovered.** A duplicate usually announces itself
+with its own callback — but a callback is exactly the thing that goes missing, and
+then the only way the charge is ever found is the reconciler asking
+(*Reconciling what never came back*). What happens next must not depend on which
+of the two got there first: a duplicate found by asking is recorded and refunded
+exactly like one a callback announced, subject to the same
+`merchants.duplicate_auto_refund`. The refund it queues is `pending` — the same
+state a failed automatic refund leaves behind — so it is delivered by the same
+machinery described next, in that pass or a later one.
+
 **And when that refund itself fails**, the money must not be left somewhere whose
 only record is a log line. The duplicate is recorded before the refund is
 attempted, so the fact survives whatever happens next; the refund row stays
@@ -392,6 +402,12 @@ alternatives: a merchant whose request timed out wants its order back, not an
 error, and a merchant whose loop double-submitted wants an error, not a second
 order. `orders.feature` asserts both in the same file, two scenarios apart.
 
+A replay is only ever as good as what was stored. If the stored answer cannot be
+reproduced faithfully — a status that is no longer a status — paygate answers
+`500 INTERNAL` and logs it, rather than guessing at one. A request the merchant
+was told had failed must not come back a success the second time it is asked
+about.
+
 There is a third duplicate above paygate — the same order handed off twice — and
 it is the one that cannot be prevented, only cleaned up. A reload, a back button
 or six browsers at one instant each get their own `provider_trade_no`, because
@@ -473,6 +489,13 @@ one place a provider's silence is paygate's problem:
 - No answer within `PSP_TIMEOUT_MS` is also `502`, the refund row stays
   `pending`, and `amount_refunded` is not moved. The idempotency key is *not*
   consumed, so the merchant's retry reaches the provider, which deduplicates.
+- A retry that no longer fits is told how much is left, not merely refused. The
+  reservation the timed-out refund made was rolled back, so a *different* refund
+  can take the remainder in between and the resumed retry can no longer be
+  honoured. It answers `422 REFUND_EXCEEDS_REMAINING` with the amount that
+  remains — the same answer a fresh request of that size would get — and never
+  `PAYMENT_NOT_REFUNDABLE`, which would be a lie: the payment is refundable,
+  this amount is not.
 
 ---
 
@@ -561,6 +584,31 @@ fails instead of corrupting:
 | Refunds never exceed the charge | the refund command | `CHECK (amount_refunded BETWEEN 0 AND amount)` |
 | One idempotency key answers once | the idempotency record | `PRIMARY KEY (merchant_id, idempotency_key)` |
 | One order per merchant trade number | the create command | `UNIQUE (merchant_id, merchant_trade_no)` |
+| One payment's two rows are locked parent first | every command that takes both | `payments` before `payment_attempts`, everywhere |
+| A reconciliation pass never deadlocks against a refund or a callback | the reconciler's claim | the claim is `FOR UPDATE` on `payments`, `SKIP LOCKED` |
+
+Two of those rows belong to the same payment — its `payments` row and the
+`payment_attempts` row under it — and more than one command needs both, so the
+order they are taken in is part of the design rather than an implementation
+detail: **`payments` first, always, then `payment_attempts`.** A command that
+starts from the attempt — a callback arrives naming a provider trade number, not
+an order — reads its `payment_id` without a lock first, which is sound because an
+attempt never moves to another payment, and then locks parent before child. Two
+paths that take the same two rows in two different orders deadlock: PostgreSQL
+detects it and kills one of them with `40P01`, which reaches the outside world as
+a random `500` on a merchant's refund, or as a callback the provider goes on
+resending because it was never acknowledged. Retrying does not make that correct.
+The order does.
+
+The reconciler is where this is easiest to get wrong, so the rule is stated for it
+directly: its batch claim takes `FOR UPDATE … SKIP LOCKED` on **`payments`**,
+never on `payment_attempts`. That claim is held across a round trip to the
+provider for every attempt in the batch, so whichever table it locks first fixes
+the acquisition order for the whole pass, whatever the functions it calls later
+do internally. Claiming on `payments` also excludes more rather than less: two
+reconciler replicas can no longer take two different attempts of one payment at
+the same time, and a candidate whose payment is busy is skipped this pass instead
+of waiting behind it.
 
 ---
 
@@ -626,6 +674,16 @@ every query so that "paygate asked" — and more often "paygate did NOT ask yet"
 is assertable. Query it too fast and it answers `403` and stops answering for a
 while, as the real one does.
 
+`888` is the amount whose provider is SLOW about the whole order: its query is
+answered after 800 ms, and its callback is delivered 300 ms after it is
+released. The reconciler holds its batch claim for as long as the provider takes
+to answer, so a scenario that needs a pass to be still in flight while a
+callback for the same attempt arrives says so with the ORDER'S OWN AMOUNT rather
+than with a word invented for it — and the shorter callback delay is what puts
+the callback INSIDE that window instead of leaving which of the two gets there
+first to chance. It is not `777`, the refund side's slow amount: an order of 777
+would have a slow refund as well, and one scenario rarely wants both.
+
 Four things it can do to a callback besides reporting it honestly, because all
 four happen: sign it with a key it was never issued (`forged`), set
 `SimulatePaid=1`, send an amount that is not the order's, or send any `RtnCode`
@@ -674,8 +732,11 @@ could fill one — `orders.feature` asserts that against `information_schema`.
 
 ### Kafka
 
-Topic `paygate.payment-events.v1`, 3 partitions, created by the stack. Key:
-`payment_id`. Value: the audit row.
+Topic `paygate.payment-events.v1`, 3 partitions, created by the **relay** at startup —
+idempotently, tolerating a topic that is already there, so any number of replicas may start at
+once. Broker-side auto-creation is off, because a topic that appears with whatever
+`num.partitions` happened to be set to is not a schema. The ingester reports itself unready until
+the topic exists and it holds an assignment. Key: `payment_id`. Value: the audit row.
 
 ### ClickHouse
 
@@ -741,6 +802,40 @@ The one deliberate deviation from ECPay and NewebPay is below paygate, not above
 their merchant APIs authenticate queries and refunds with a check value, and
 paygate's uses a bearer API key. Above paygate — where this example's subject
 matter is — the protocol is theirs.
+
+### Credentials in this repository
+
+This example is a whole working system, so it necessarily contains values that
+are shaped like credentials: the pair a request is signed with, the key a
+fixture seeds, the password a browser test types. **None of them authenticate
+against anything that exists**, and the code never holds one: every secret a
+running service needs is read from the environment at startup, with no default
+and no fallback (`crates/infra/src/config.rs` — `required("MERCHANT_HASH_KEY")`
+and its siblings), and what the database stores is a SHA-256 of an API key or a
+bcrypt of a password, never the thing itself.
+
+| What | Where it comes from |
+|---|---|
+| `3002607` / `pwFHCqoQZGmho4w6` / `EkRm7iFT261dpevs`, and the test merchant `2000132` | **ECPay's own published sandbox credentials**, printed in ECPay's official WooCommerce plugin README. Every developer integrating with ECPay uses this same pair against the same public sandbox. They are also not optional: `CheckMacValue` is verified against ECPay's documented sample vector, and a different key would make that test prove nothing |
+| The NewebPay pair, and every merchant's `hash_key` / `hash_iv` | Invented. NewebPay publishes no sandbox pair; the merchant ones spell out what they are (`acmehashkey0123456789abcdef01234`) |
+| `sk_test_…` API keys | Fixtures. A key is in plaintext for one reason — a request has to carry a credential for the test to be a test — and `api_keys.feature` asserts that only its SHA-256 is stored |
+| `secret123` and its bcrypt hashes | The fixture login for the dashboard tests |
+
+One of those deserves a note rather than a row. The tail of
+`sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc` is **the sample secret key from
+Stripe's own documentation** — inert, and belonging to a company this project
+has nothing to do with. It is the one value here a reader could mistake for a
+real leak. It was left alone deliberately: changing it means recomputing every
+seeded `key_hash` across eighteen feature files, for a string that authenticates
+nothing. A new fixture should not copy its shape.
+
+`.gitleaks.toml` at the root of the repository forgives each of these **by
+value**, one at a time, and never by file — a path-based allowlist would stop
+looking at exactly the files most likely to grow a real secret later. CI runs
+that scan on every pull request, so adding a fixture credential means adding it
+to that config, in a diff somebody reviews. The one real private key in the
+example, the localhost TLS certificate, is generated per machine by
+`local/certs/generate.sh` and is not committed at all.
 
 ---
 
@@ -841,10 +936,14 @@ count without adding a mechanism.
 | NFR-IDEM-1 | One idempotency key changes money at most once | BDD: `idempotency.feature`, `resilience.feature` |
 | NFR-IDEM-2 | One merchant trade number is one order | BDD: `orders.feature` |
 | NFR-IDEM-3 | One provider order number is used once, ever, and fits 20 alphanumerics | BDD: `handoff.feature`, `scaling.feature`; unit: the generator |
+| NFR-IDEM-4 | A stored answer that cannot be replayed faithfully is a failure, never a success | BDD: `idempotency.feature` |
 | NFR-CONC-1 | An order is settled once, whichever of a callback and a reconciliation gets there first | BDD: `webhooks.feature`, `reconcile.feature`, `scaling.feature` |
 | NFR-CONC-2 | Refunds never exceed the charge | BDD: `refunds.feature`, `scaling.feature`; schema |
+| NFR-REFUND-1 | A refund that cannot be honoured says how much is left, whether it is a new request or a resumed one | BDD: `refunds.feature` |
 | NFR-CONC-3 | A provider callback applies at most once | BDD: `webhooks.feature`, `scaling.feature` |
 | NFR-CONC-4 | Rate limits hold under concurrency | BDD: `rate_limits.feature` |
+| NFR-CONC-5 | A refund and a provider callback for one payment never deadlock against each other | BDD: `reconcile.feature` (both at one instant); unit: `infra` — driven until PostgreSQL would have raised `40P01` |
+| NFR-CONC-6 | A reconciliation pass never deadlocks against a callback for the attempt it claimed, however long the provider takes to answer | BDD: `reconcile.feature` (a pass and the duplicate's callback at one instant, on the slow amount); unit: `infra` |
 | NFR-SIG-1 | What paygate hands the provider verifies against the provider's key | BDD: `handoff.feature` — the mock accepts it, and refuses a tampered copy |
 | NFR-SIG-2 | A callback not signed by the provider changes nothing | BDD: `webhooks.feature` |
 | NFR-SIG-3 | What paygate sends the merchant verifies against the merchant's key | BDD: `notify.feature` (`/notify-strict`) |
@@ -856,6 +955,7 @@ count without adding a mechanism.
 | NFR-RECON-3 | An answer from a provider is verified before it is acted on, in both directions | BDD: `reconcile.feature` (forged query answer), `webhooks.feature` (forged callback) |
 | NFR-DUP-1 | A second payment for one order is settled once, recorded, and refunded | BDD: `duplicate_payment.feature` |
 | NFR-DUP-2 | A duplicate refund that failed at the provider is retried, not abandoned | BDD: `duplicate_payment.feature` |
+| NFR-DUP-3 | A duplicate found by asking is refunded exactly like one a callback announced | BDD: `duplicate_payment.feature` |
 | NFR-PLAT-1 | Every request to a provider carries the merchant's own account and the platform's signature; paygate never holds funds | BDD: `handoff.feature`; unit: the signer |
 | NFR-NOTIFY-1 | Every outcome is owed to the merchant, written with it | BDD: `webhooks.feature`, `notify.feature` |
 | NFR-NOTIFY-2 | Delivery is retried until `1\|OK`, to a stated limit | BDD: `notify.feature` |
@@ -894,7 +994,7 @@ count without adding a mechanism.
 | Variable | Used by | Default |
 |----------|---------|---------|
 | `PORT`, `INSTANCE_ID`, `LOG_LEVEL`, `SHUTDOWN_GRACE_SECONDS` | all | 8080, hostname, info, 10 |
-| `DB_DSN`, `DB_POOL_MAX` | api, relay, notifier | — required, 20 |
+| `DB_DSN`, `DB_POOL_MAX` | api, relay, notifier, reconciler | — required, 20 |
 | `SCHEMA_AUTO_MIGRATE` | api | false — the suites leave it false: `run migration` is a step |
 | `REDIS_URL`, `REDIS_TIMEOUT_MS` | api | — required, 100 |
 | `CLICKHOUSE_URL`, `CLICKHOUSE_DATABASE`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD` | api, ingester | — required |
@@ -902,15 +1002,25 @@ count without adding a mechanism.
 | `RELAY_BATCH_SIZE`, `RELAY_POLL_INTERVAL_MS` | relay | 100, 50 |
 | `INGEST_BATCH_MAX`, `INGEST_BATCH_WAIT_MS` | ingester | 500, 200 |
 | `NOTIFY_MAX_ATTEMPTS`, `NOTIFY_BACKOFF_MS`, `NOTIFY_TIMEOUT_MS`, `NOTIFY_POLL_INTERVAL_MS` | notifier | 5, `50,100,200,400`, 2000, 50 |
-| `PROVIDER_TRADE_NO_PREFIX` | api | — required, ≤ 6 characters; startup fails unless `len(prefix) + 15 ≤ 20` |
-| `RECONCILE_AFTER_MINUTES`, `RECONCILE_RETRY_MINUTES`, `RECONCILE_POLL_INTERVAL_MS`, `RECONCILE_BATCH_SIZE` | reconciler | 60, 60, 1000 (suites 50), 50 |
+| `PROVIDER_TRADE_NO_PREFIX` | api | — required, ≤ 5 characters; startup fails unless `len(prefix) + 15 ≤ 20` |
+| `RECONCILE_AFTER_MINUTES`, `RECONCILE_RETRY_MINUTES`, `RECONCILE_POLL_INTERVAL_MS`, `RECONCILE_BATCH_SIZE`, `RECONCILE_HTTP_TIMEOUT_MS` | reconciler | 60, 60, 1000 (**suites 0**), 50, 3000 |
 | `PUBLIC_BASE_URL` | api | — required; what the provider is told to call back |
 | `PSP_TIMEOUT_MS` | api | 3000 (suites use 1000) — refunds only; there is no synchronous charge |
 | `PROVIDER_CALLBACK_URLS` | provider-mock | — required; delivery i goes to entry i mod n |
+| `ECPAY_PLATFORM_ID`, `ECPAY_HASH_KEY`, `ECPAY_HASH_IV`, `NEWEBPAY_PLATFORM_ID`, `NEWEBPAY_HASH_KEY`, `NEWEBPAY_HASH_IV` | provider-mock | — the pair each provider issued the platform, which is how "the mock is told the same pair" below is actually done |
 | `SESSION_TTL_SECONDS`, `API_KEY_CACHE_TTL_SECONDS` | api | 28800, 60 |
 | `IDEMPOTENCY_TTL_HOURS`, `IDEMPOTENCY_LOCK_TTL_MS` | api | 24, 30000 |
 | `COOKIE_SECURE`, `FRONTEND_ORIGIN` | api | true, — |
 | `GATEWAY_URL`, `DEMO_MERCHANT_API_KEY`, `MERCHANT_HASH_KEY`, `MERCHANT_HASH_IV` | demo-merchant | — required |
+| `PROVIDER_BASE_URL` | api, reconciler | — required; the origin `providers.cashier_url`, `query_url` and `refund_url` are resolved against, because they are PATHS on the shared proxy |
+| `MERCHANT_BASE_URL` | notifier | — required; the origin a payment's path-only `notify_url` is resolved against |
+| `KAFKA_TOPIC_PARTITIONS` | relay | 3 — the relay creates the topic at startup if it is not there, and tolerates finding it already created |
+
+`RECONCILE_POLL_INTERVAL_MS = 0` means *do not poll* — run only when an operator asks, over the
+worker's own admin port. The suites set it, because `the reconciler runs` has to be the only thing
+that makes paygate ask: a reconciler polling in the background would settle an aged attempt
+between the `UPDATE` that aged it and the step that meant to trigger the asking, and the scenario
+would be asserting a race. Production keeps 1000.
 
 `ReturnURL` is not a setting but a constraint: ECPay requires a public host (not
 localhost, not a CDN address), ports 80 or 443 only, no Chinese domain unless
@@ -941,7 +1051,7 @@ Unit tests, by crate:
   rules; `provider_trade_no` generation (length, alphabet, never repeated); the
   idempotency fingerprint.
 - `domain` (continued) — the provider-number generator: character set, length,
-  that a six-character prefix still fits twenty, and that a thousand numbers for
+  that a five-character prefix still fits twenty and a six-character one does not, and that a thousand numbers for
   one order are all different.
 - `provider` — the two adapters against known vectors: ECPay's `CheckMacValue`
   (the documented sample), including each of the seven .NET encode replacements
@@ -957,7 +1067,12 @@ Unit tests, by crate:
   than success; the notifier's
   claim, backoff schedule, `1|OK` matching (exact, not prefix), attempt cap; the
   relay's claim and message key; audit row → Kafka → ClickHouse mapping; report
-  SQL for a timezone and range; Redis circuit breaker; log redaction.
+  SQL for a timezone and range; Redis circuit breaker; log redaction; **the lock
+  order every command takes on `payments` and `payment_attempts`** — a refund
+  driven against a callback for one payment, and the reconciler's own claim
+  driven against an automatic duplicate refund, both repeated enough times that
+  the wrong order really does raise `40P01`, so that the test fails on the bug
+  rather than on the day it happens to interleave badly.
 - `api` — error bodies; `1|OK` written only after the commit; cookie attributes
   for both `COOKIE_SECURE` settings; request id handling; configuration parsing.
 - `infra` (continued) — the reconciler's selection query: only `redirected`,
@@ -981,7 +1096,12 @@ part of the API stack too, because they are the two counterparties:
 | `@serial` | runs alone; every `@stack:scaled` scenario carries it |
 
 Concurrency: half the machine's CPUs. A default stack is eleven containers in
-API and thirteen in e2e, so a 4-vCPU runner runs two scenarios at a time.
+API and twelve in e2e, so a 4-vCPU runner runs two scenarios at a time. The
+twelfth is Caddy, and the front end is not a container at all: it is a static
+bundle, generated once for the whole run and copied into each scenario's own
+Caddy. That is what lets an e2e scenario own every container it uses — there is
+no long-lived frontend every scenario would otherwise have to share, and
+therefore no run-wide network either.
 
 **Containers are Testcontainers' to manage, on both surfaces, and nothing else
 manages them.** The API suite uses `testcontainers` for Rust, the e2e suite uses
@@ -993,7 +1113,33 @@ started, waited for and stopped through that library:
 | the library's own container handles, dropped or stopped at the end of the scenario | shelling out to `docker run`, `docker rm`, `docker compose up` from a test |
 | the library's wait strategies — a log line, a port, an HTTP probe, an exit code | `sleep` followed by a retry loop somebody wrote |
 | the library's network and per-container aliases | hand-assigned host ports, or a fixed network name two scenarios could share |
-| Ryuk, the library's own reaper, left enabled | a bespoke sweeper that hunts leftovers by label |
+| the library's own removal, awaited, with its `Drop` left armed behind it — Ryuk where there is one | a bespoke sweeper that hunts leftovers by label |
+
+The two libraries do not offer the same guarantees, and the table's last row is
+where they differ. The `testcontainers` package for Node runs **Ryuk**, a reaper
+container that removes what a killed process left behind, and it is on by
+default. `testcontainers` for Rust has no reaper at all — it is an open request
+(`testcontainers/testcontainers-rs#577`), absent even from 0.28, and the
+`watchdog` feature that looks like a substitute does not remove containers on a
+signal when tried. So on the API surface removal is the harness's own
+responsibility: every container is removed explicitly, through the library's own
+awaited `rm()`, and `backend/apitest` carries that as an invariant on
+`Stack::start` — it either returns a stack or leaves nothing behind. That is
+still the library owning the lifecycle.
+
+`Drop` is not what does it, and the reason is in `tests/api.rs`: reaching an
+async Docker call from a synchronous `Drop` deadlocked this suite twice, on
+either tokio runtime flavour. But `Drop` is left **armed**
+(`TESTCONTAINERS_COMMAND` keeps its default, `remove`), because there is exactly
+one container an explicit `rm()` can never reach: the library wraps "create,
+start, wait for ready" in a timeout of its own, and a timeout CANCELS that
+future after the container is already running, so the half-built handle is
+dropped before it is ever returned. Disarming `Drop` meant every failed startup
+left its container behind — and a leaked container eats the memory the next
+scenario needs, so one crashed process became eight failed scenarios and nine
+abandoned containers in a single run. An explicit `rm()` marks its container
+dropped, so the two never collide: `Drop` acts only on what the harness could
+not reach, and on a removal that failed.
 
 The rule is not stylistic. A hand-rolled lifecycle is where per-scenario
 isolation quietly stops being true: a port that was free when the test was
@@ -1002,14 +1148,33 @@ passes before the process is actually listening. Every one of those failures
 looks like a flaky test and is really a broken claim, and the claim this suite
 exists to make is that each scenario had a stack of its own.
 
-The one thing a test may do to Docker directly is **build the image**, once, for
-the whole suite, before any scenario runs — `docker build` with
+Two things a test may do to Docker directly, both once for the whole suite and
+both before any scenario runs. Neither is a lifecycle.
+
+The first is **build the image** — `docker build` with
 `examples/paygate-rust-nuxt` as the context and `backend/Dockerfile` as the
 file, so that the image under test and the image a person runs locally come from
 the same two inputs. That is a build, not a lifecycle: after it, a scenario's
 stack is a start rather than a compile, which is what makes eleven containers per
 scenario affordable at all. `local/docker-compose.yml` exists for a human at a
 keyboard and is never what a test runs.
+
+The second is **create the run's shared network**, on the API surface, and it is
+what keeps the first paragraph of this section true. `testcontainers` for Rust
+removes a network as soon as the last container referencing it goes — which,
+between two scenarios, is every time: the run's one network would be destroyed
+and re-created 174 times, each cycle another Docker address-pool allocation, and
+"all predefined address pools have been fully subnetted" is a failure this suite
+has already had. A network that already exists is one the library declines to
+own (`Network::new` returns `None` for it) and therefore never removes, which is
+what lets `Drop` stay armed for the containers — the two are the same decision.
+Removing a network is not something a test does at all: it outlives the run and
+the next run reuses it.
+
+Isolation does not rest on the network in any case. It rests on every container
+being its scenario's own: each name carries the scenario id, nothing addresses
+another scenario's containers, and a scenario's own PostgreSQL, Redis, Kafka and
+ClickHouse are started and removed with it.
 
 ### Mutation checks
 
@@ -1045,6 +1210,12 @@ keyboard and is never what a test runs.
 | Relay `FOR UPDATE` | the 600-row scenario, `publish_count` |
 | `FINAL` in the report query | the republished-row scenario (not guaranteed — recorded as found) |
 | Returning a failed attempt's order to `pending` | the retry scenarios on both surfaces |
+| Refunding a duplicate the QUERY found (leaving only the callback path to refund) | `reconcile.feature`'s "found by asking, and given back" — the duplicate is recorded and the money never goes back |
+| Reading `duplicate_auto_refund` on the query path (refunding regardless) | `reconcile.feature`'s "with automatic refunds switched off", as a refund the merchant asked not to have |
+| Reporting the remaining amount on a resumed retry (a blanket `PAYMENT_NOT_REFUNDABLE`) | `refunds.feature`'s resumed-retry scenario |
+| Failing on a stored status that cannot be parsed (falling back to `200 OK`) | `idempotency.feature`'s corrupted-store scenario, as a failure replayed as a success |
+| Locking `payments` before `payment_attempts` in the callback path | `reconcile.feature`'s "the lost callback turns up while the merchant is refunding", as a callback answered something other than `1\|OK`; and `crates/infra`'s lock-order tests, as `40P01`. Both, because a scenario arranges ONE race and the unit tests arrange forty |
+| Claiming on `payments` in the reconciler's batch query (claiming on `payment_attempts` instead) | `reconcile.feature`'s "a reconciliation pass and the duplicate's own callback", as a callback never acknowledged — which is a provider resending it forever. The `888` provider is what makes that certain rather than likely: the pass is holding its claim across an 800 ms answer and the callback arrives 300 ms in, so the two really do contend. With an instant callback the same mutation passes, because the callback commits before the pass claims and the attempt is no longer a candidate |
 
 ### CI
 

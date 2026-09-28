@@ -1,0 +1,117 @@
+####
+# gitleaks configuration for this repository.
+#
+# Every example here is a whole working system, so it necessarily contains
+# things that are SHAPED like credentials: the values a scenario signs a request
+# with, the key a fixture seeds, the password a login test types. None of them
+# authenticate against anything that exists — see `spec.md` → "Credentials in
+# this repository" in each example — but a scanner cannot know that, and a
+# scanner that is switched off because it cries wolf protects nothing.
+#
+# So the allowlist below names the VALUES, one by one, rather than the files
+# they appear in. A path-based allowlist would blind the scan to a real secret
+# that turns up in one of those files later, which is exactly the leak this is
+# supposed to catch; naming the values keeps every file scanned and only these
+# strings forgiven. Adding a new fixture credential therefore means adding it
+# here, deliberately, in a diff someone reviews.
+####
+
+title = "RealSpec"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+ECPay's own published sandbox credentials. They are printed in ECPay's official
+WooCommerce plugin README (`| 金流 | 3002607 | pwFHCqoQZGmho4w6 | EkRm7iFT261dpevs |`)
+and every developer integrating with ECPay uses this same pair against the same
+public sandbox. They are also not optional here: `CheckMacValue` is verified
+against ECPay's documented sample vector, so a different key would make that
+test prove nothing at all.
+"""
+regexTarget = "match"
+regexes = [
+  '''pwFHCqoQZGmho4w6''',
+  '''EkRm7iFT261dpevs''',
+  '''3002607''',
+  '''2000132''',
+]
+
+[[allowlists]]
+description = """
+Invented counterparty credentials for the NewebPay adapter and for each fixture
+merchant. NewebPay publishes no sandbox pair, so these are made up; the merchant
+ones spell out what they are (`acmehashkey0123456789abcdef01234`).
+"""
+regexTarget = "match"
+regexes = [
+  '''Fs5cX1TGqYZ3kLmN8pQrS2tUvW4xY6zA''',
+  '''B7cD9eF1gH3iJ5kL''',
+  '''MS1[0-9]{7}''',
+  '''(acme|globex)hash(key|iv)[0-9a-f]*''',
+  '''0123456789abcdef0123456789abcdef''',
+]
+
+[[allowlists]]
+description = """
+Fixture API keys. A merchant's key reaches this repository in plaintext for one
+reason: a request has to carry a credential for the test to be a test. What the
+system stores is only the SHA-256 of it (`api_keys.key_hash`), which is the
+property `api_keys.feature` asserts.
+
+`sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc` deserves its own note: the tail of it is
+the sample secret key from Stripe's own documentation, which is inert and
+belongs to a company this project has nothing to do with. It was left as it is
+deliberately — changing it means recomputing every seeded `key_hash` across
+eighteen feature files — but it is the one value here that a reader could
+mistake for a real leak, so: it is not one, and a new fixture should not copy
+its shape.
+"""
+regexTarget = "match"
+regexes = [
+  '''sk_test_[a-z]+(_[A-Za-z0-9]*)?''',
+]
+
+[[allowlists]]
+description = """
+Fixture logins and idempotency keys. The bcrypt hashes are of `secret123`, typed
+by a browser test on a sign-in form that only ever talks to a container started
+for that scenario.
+"""
+regexTarget = "match"
+regexes = [
+  '''secret123''',
+  '''\$2[aby]\$[0-9]{2}\$[A-Za-z0-9./]{53}''',
+  '''key-[a-z]+-[a-z0-9-]+''',
+]
+
+[[allowlists]]
+description = """
+Documentation examples: a truncated JWT in an OpenAPI `example:`, and Kafka's
+cluster id, which is an identifier rather than a secret.
+"""
+regexTarget = "match"
+regexes = [
+  '''eyJhbGciOiJIUzI1NiIs[A-Za-z0-9._-]*''',
+  '''5L6g3nShT-eMCtK--X86sw''',
+]
+
+[[allowlists]]
+description = """
+Generated, never committed: the localhost TLS certificate each machine makes for
+itself (`local/certs/generate.sh`), and build output. These are listed because a
+developer running the scan locally has them on disk; CI checks out a clean tree
+and never sees them.
+"""
+paths = [
+  '''local/certs/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)target/''',
+  '''(^|/)\.next/''',
+  '''(^|/)\.nuxt/''',
+  '''(^|/)\.output/''',
+  '''(^|/)dist/''',
+  '''(^|/)reports/''',
+  '''(^|/)\.gitleaks-baseline\.json$''',
+]

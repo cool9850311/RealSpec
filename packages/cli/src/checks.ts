@@ -15,7 +15,7 @@
  */
 
 import { parseSteps, pyStrip, type Step } from './parse.js';
-import { matchesStepText, type StepDef } from './registry.js';
+import { matchesStepText, type StepDef, type StepRefSpec } from './registry.js';
 
 // ── Docstring substitution patterns (mirrors validate.py) ────────────────────
 // These tokens are replaced with neutral values before JSON/SQL parsing so the
@@ -537,6 +537,63 @@ export function checkHttpBody(content: string): string | null {
   return null;
 }
 
+/**
+ * `step_ref`: a JSON docstring may NAME other steps of the same registry, so a
+ * step that arranges several things at once composes the registry's existing
+ * vocabulary rather than a new step being added for every actor that might take
+ * part.
+ *
+ * A name is an ELEMENT of the docstring's top-level array whose only key is
+ * `spec.key`. Nothing nested inside an element is looked at, so a request body
+ * that happens to carry a field of that name is still a body; and a step that
+ * declares no `step_ref` is never scanned at all. Both limits are deliberate:
+ * this check must be unable to invent a violation out of ordinary data.
+ *
+ * The named step has to resolve, which is what keeps a registry that uses this
+ * extension closed: the set of things nameable here is exactly the set of steps
+ * it declares.
+ */
+export function checkStepRefs(
+  content: string,
+  spec: StepRefSpec,
+  steps: readonly StepDef[],
+): string | null {
+  const result = pyJsonLoads(substituteJson(content));
+  if (!result.ok) return null; // checkJson already reported it
+
+  const root = result.value;
+  if (root.t !== 'arr') return null; // nothing to name
+
+  const names: string[] = [];
+  for (const element of root.v) {
+    if (element.t !== 'obj') continue;
+    if (element.v.length !== 1 || element.v[0]![0] !== spec.key) continue;
+    const value = element.v[0]![1];
+    if (value.t === 'str') names.push(value.v);
+  }
+
+  for (const name of names) {
+    const named = steps.find((def) => matchesStepText(def, name));
+    if (named === undefined) {
+      return `'${spec.key}' names ${JSON.stringify(name)}, which is not a step in this registry`;
+    }
+    const missing = spec.keywords.filter((k) => !named.keywords.includes(k));
+    if (missing.length > 0) {
+      return (
+        `'${spec.key}' names step '${named.id}', which is not declared with ` +
+        `${pyReprStrList(missing)} — only such steps may be named here`
+      );
+    }
+    if (spec.docstring === 'none' && named.docstring !== null) {
+      return (
+        `'${spec.key}' names step '${named.id}', which takes a docstring of its own — ` +
+        `a step named here carries no body, so it cannot be one that needs one`
+      );
+    }
+  }
+  return null;
+}
+
 // Python's `\s` and `\b` are Unicode-aware for `str` patterns while
 // JavaScript's are not, so both are spelled out here.
 const PY_SPACE_CLASS =
@@ -662,6 +719,9 @@ export function validate(
     let err: string | null = null;
     if (expectedType === 'json') {
       err = match.id === 'http_request' ? checkHttpBody(step.dsContent) : checkJson(step.dsContent);
+      if (err === null && match.stepRef !== null) {
+        err = checkStepRefs(step.dsContent, match.stepRef, compiledSteps);
+      }
     } else if (expectedType === 'sql') {
       err = checkSql(step.dsContent, match.id);
     }

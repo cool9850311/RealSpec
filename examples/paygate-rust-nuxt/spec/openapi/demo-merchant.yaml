@@ -160,6 +160,20 @@ paths:
                   status: { type: string, enum: [awaiting_payment, paid, refunded] }
                   amount: { type: integer }
                   trade_no: { type: [string, "null"] }
+                  last_attempt_status:
+                    type: string
+                    enum: [redirected, succeeded, failed, abandoned]
+                    description: |
+                      **Addition, not in the original schema.** paygate deliberately tells a
+                      merchant nothing when an attempt merely fails (spec.md: "A failed attempt
+                      leaves the order payable and tells the merchant nothing"), yet the shop's
+                      own `/shop/result` page must be able to say "Payment failed" without
+                      waiting on a callback that will never come. So while this merchant's own
+                      `status` is still `awaiting_payment`, this endpoint asks paygate itself —
+                      `GET /api/v1/payments/{paymentId}`, with this merchant's own API key — and
+                      passes its `last_attempt.status` straight through. Absent (never `null`)
+                      once `status` is no longer `awaiting_payment`, or when paygate could not be
+                      asked, or when it had no `last_attempt` to report.
         "404":
           description: No such order
 
@@ -287,6 +301,42 @@ paths:
           content:
             text/plain:
               schema: { type: string, const: "0|ERROR" }
+
+  /__deliveries:
+    get:
+      operationId: getDeliveryLog
+      summary: This merchant's own delivery log — an addition, not part of the original schema
+      description: |
+        **Addition, not in the original schema.** The registry step `merchant received <n>
+        notifications at "<path>"` (`spec/bdd/format.yml`) needs a count of deliveries per
+        `notify*` path, and until this endpoint existed there was nowhere to read one from. It is
+        the merchant's own log, not paygate's — a fact this merchant records about calls it
+        received, the same way `payment provider received <n> requests` reads the payment
+        provider's own request log — so exposing it breaks no rule about what paygate may know
+        about itself.
+
+        Counted from process start, per path, in delivery order.
+      responses:
+        "200":
+          description: Every delivery this process has received, grouped by the path it arrived on
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: array
+                  items:
+                    type: object
+                    required: [received_at, body, answered]
+                    properties:
+                      received_at: { type: string, format: date-time }
+                      body:
+                        type: object
+                        additionalProperties: { type: string }
+                        description: The delivery's form fields, url-decoded.
+                      answered:
+                        type: string
+                        description: The exact body this merchant answered with.
 
 components:
   schemas:

@@ -657,9 +657,9 @@ Feature: Telling the merchant
     Then merchant received 10 notifications at "/demo-merchant/api/notify-reject"
     And in PostgreSQL query returns 1 row:
       """sql
-      SELECT count(*) AS c FROM notifications
+      SELECT 1 FROM notifications
        WHERE payment_id = '{paymentId}' AND attempts = 5 AND exhausted_at IS NOT NULL AND delivered_at IS NULL
-      HAVING c = 2;
+      HAVING count(*) = 2;
       """
     # Exhaustion is not a failure of the payment: the refund moved the money
     # whether or not the merchant ever heard about either outcome.

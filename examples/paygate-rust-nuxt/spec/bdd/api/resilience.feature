@@ -91,12 +91,18 @@ Feature: Surviving the loss of Redis
     # And the order the merchant could still create twice is refused by
     # PostgreSQL's unique constraint on (merchant_id, merchant_trade_no), not by
     # anything Redis remembered.
+    #
+    # A DIFFERENT key, deliberately: reusing the first one would be the same
+    # REQUEST sent twice, which is replayed with the stored answer and never
+    # reaches the trade-number check at all — the two mechanisms answer different
+    # questions (spec.md, "Two kinds of duplicate"). This one is asking the
+    # business question, so it has to arrive as a new request.
     When POST /api/v1/payments:
       """json
       {
         "headers": {
           "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
-          "Idempotency-Key": "key-acme-noredis-1"
+          "Idempotency-Key": "key-acme-noredis-2"
         },
         "body": {
           "merchant_trade_no": "ACME-NOREDIS-1",
@@ -209,23 +215,63 @@ Feature: Surviving the loss of Redis
     When payment provider delivers each pending callback 1 time
     Then exactly 1 response is 200
     Given service "redis" is stopped
-    When GET /api/v1/health/ready is called concurrently:
+    When these things happen at one instant:
       """json
       [
-        { "body": {} },
-        { "body": {} },
-        { "body": {} },
-        { "body": {} }
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}}
       ]
       """
     Then exactly 4 responses are 200
-    When POST /api/v1/payments/{paymentId}/refunds is called concurrently:
+    When these things happen at one instant:
       """json
       [
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "nr-key-<run>" }, "body": { "amount": 777 } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "nr-key-<run>" }, "body": { "amount": 777 } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "nr-key-<run>" }, "body": { "amount": 777 } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "nr-key-<run>" }, "body": { "amount": 777 } }
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "nr-key-<run>"
+          },
+          "body": {
+            "amount": 777
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "nr-key-<run>"
+          },
+          "body": {
+            "amount": 777
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "nr-key-<run>"
+          },
+          "body": {
+            "amount": 777
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "nr-key-<run>"
+          },
+          "body": {
+            "amount": 777
+          }
+        }
       ]
       """
     Then exactly 1 response is 201

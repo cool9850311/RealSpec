@@ -71,13 +71,21 @@ Feature: Buying something, and never once touching paygate
     Then "heading:3-D Secure" is visible
     And text of "testid:issuer-amount" is "$12.50"
     When click "button:Authenticate"
-    # Back at the SHOP, which reads its own record and has not been told anything
-    # yet. Guessing here is how a shop ships for free.
+    # Back at the SHOP, which reads its own record: the back channel reaches
+    # paygate, paygate tells the merchant, and the page, which polls its own
+    # server, catches up.
     Then page URL is "/shop/result"
-    And text of "testid:shop-result-status" is "Awaiting payment"
-    # The back channel reaches paygate, paygate tells the merchant, and the page,
-    # which polls its own server, catches up.
     And text of "testid:shop-result-status" is "Paid"
+    # There is deliberately no assertion of "Awaiting payment" in between.
+    # Authenticating at the issuer is what releases the callback, so the window in
+    # which the shop has not yet been told is not something a browser can be
+    # scheduled into: asserting it is a race against the back channel, and it
+    # fails or passes depending on which wins. The two claims it was reaching for
+    # are each proved where they can be proved without a race — that a customer
+    # who never completes is never told they paid, by "A customer who abandons the
+    # provider" below, whose state is stable because no callback is ever released;
+    # and that a completed payment settles nothing until the back channel arrives,
+    # by `api/handoff.feature`, where the callback is held until a step delivers it.
     And payment provider received 1 checkout request
     And in PostgreSQL query returns 1 row:
       """sql
@@ -240,13 +248,18 @@ Feature: Buying something, and never once touching paygate
     And click "button:Pay"
     And click "button:Authenticate"
     Then text of "testid:shop-result-status" is "Paid"
-    And payment provider received 3 checkout requests
+    # Two arrivals, one per form, which is the same two the attempt count above
+    # asserts: every hand-off carries a provider order number that is never
+    # reused, so an arrival and an attempt are the same event counted from the two
+    # ends of the wire. Creating the order was not one of them — producing a form
+    # is signing, not a request (spec.md, "The hand-off").
+    And payment provider received 2 checkout requests
     And in PostgreSQL query returns 1 row:
       """sql
       SELECT 1 FROM payments
        WHERE merchant_trade_no = '{merchantTradeNo}' AND status = 'succeeded' AND amount = 1800;
       """
-    # Two of the three arrivals were never paid, so there is nothing to give back.
+    # One of the two arrivals was never paid, so there is nothing to give back.
     And in PostgreSQL query returns 0 rows:
       """sql
       SELECT 1 FROM refunds;

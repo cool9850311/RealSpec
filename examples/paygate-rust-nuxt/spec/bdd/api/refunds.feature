@@ -505,9 +505,15 @@ Feature: Refunds
       SELECT 1 FROM payment_events
        WHERE payment_id = '{paymentId}' AND event_type = 'ProviderCallTimedOut' HAVING count(*) = 1;
       """
-    And in PostgreSQL query returns 0 rows:
+    # Exactly one notification, and it is the one the Background's settlement
+    # owed the merchant — every outcome is written with it, in its transaction
+    # (spec.md, "Telling the merchant"). What must not be here is a SECOND one
+    # for a refund that has not happened: a merchant told about a refund whose
+    # answer never came would credit a customer paygate cannot prove was paid.
+    And in PostgreSQL query returns 1 row:
       """sql
-      SELECT 1 FROM notifications;
+      SELECT 1 FROM notifications
+       WHERE payment_id = '{paymentId}' HAVING count(*) = 1;
       """
     # The merchant retries the same request. paygate sends the same refund id,
     # the provider recognises it, and the customer is refunded exactly once.
@@ -530,29 +536,145 @@ Feature: Refunds
       SELECT 1 FROM payments WHERE id = '{paymentId}' AND amount_refunded = 408;
       """
     When background work has settled
-    Then merchant received 1 notification at "/demo-merchant/api/notify"
+    # Two: the settlement's, and the refund's. Every outcome is owed to the
+    # merchant and written with it (spec.md, "Telling the merchant"), and
+    # notify.feature's "A refund is reported to the merchant too" asserts the
+    # same pair for the same sequence. The lost answer changed how many times
+    # the PROVIDER was asked, not how much the merchant is owed.
+    Then merchant received 2 notifications at "/demo-merchant/api/notify"
+
+  Scenario: A resumed retry that no longer fits is told how much is left, not that the payment is closed
+    # `408` is the mock's lost-answer amount: it refunds the money and never
+    # answers (spec.md, "The payment provider mock"). paygate rolls its
+    # reservation back, which is the honest state — and it is also what lets a
+    # DIFFERENT refund take the remainder before the merchant gets around to
+    # retrying.
+    When POST /api/v1/payments/{paymentId}/refunds:
+      """json
+      {
+        "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "refund-resume-408" },
+        "body": { "amount": 408 }
+      }
+      """
+    Then response status is 502
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM refunds
+       WHERE payment_id = '{paymentId}' AND amount = 408 AND status = 'pending' HAVING count(*) = 1;
+      """
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payments WHERE id = '{paymentId}' AND amount_refunded = 0;
+      """
+    # Another refund, its own key, takes all but 300 of the charge.
+    When POST /api/v1/payments/{paymentId}/refunds:
+      """json
+      {
+        "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "refund-resume-rest" },
+        "body": { "amount": 9700 }
+      }
+      """
+    Then response status is 201
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payments
+       WHERE id = '{paymentId}' AND amount_refunded = 9700 AND status = 'succeeded';
+      """
+    # Now the merchant retries the first request. 408 of the 300 that are left
+    # cannot be honoured — and the answer has to say THAT. "This payment cannot
+    # be refunded" would be false: it can, just not for this much, and a merchant
+    # acting on the false version would stop trying to give back the 300 it still
+    # owes. It is the same answer a fresh request for 408 would get here.
+    When POST /api/v1/payments/{paymentId}/refunds:
+      """json
+      {
+        "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "refund-resume-408" },
+        "body": { "amount": 408 }
+      }
+      """
+    Then response status is 422
+    And response body contains:
+      """json
+      {
+        "error": "REFUND_EXCEEDS_REMAINING",
+        "remaining": 300
+      }
+      """
+    # Refused before the provider was asked a third time, and nothing moved: the
+    # lost refund is still on the books as pending, and the total is still what
+    # the second refund left.
+    And payment provider received 2 refund requests
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM refunds
+       WHERE payment_id = '{paymentId}' AND amount = 408 AND status = 'pending' HAVING count(*) = 1;
+      """
+    And in PostgreSQL query returns 1 row:
+      """sql
+      SELECT 1 FROM payments WHERE id = '{paymentId}' AND amount_refunded = 9700;
+      """
 
   Scenario Outline: Four refunds racing for one payment never refund more than was charged
     # Four DIFFERENT keys, so idempotency has nothing to say here. What stands
     # between 4 × 4000 and a 10000 charge is the row lock: each one reads the
     # total the previous one left behind.
-    When GET /api/v1/health/ready is called concurrently:
+    When these things happen at one instant:
       """json
       [
-        { "body": {} },
-        { "body": {} },
-        { "body": {} },
-        { "body": {} }
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}},
+        {"method": "GET", "path": "/api/v1/health/ready", "body": {}}
       ]
       """
     Then exactly 4 responses are 200
-    When POST /api/v1/payments/{paymentId}/refunds is called concurrently:
+    When these things happen at one instant:
       """json
       [
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "race-refund-<run>-a" }, "body": { "amount": 4000 } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "race-refund-<run>-b" }, "body": { "amount": 4000 } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "race-refund-<run>-c" }, "body": { "amount": 4000 } },
-        { "headers": { "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc", "Idempotency-Key": "race-refund-<run>-d" }, "body": { "amount": 4000 } }
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "race-refund-<run>-a"
+          },
+          "body": {
+            "amount": 4000
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "race-refund-<run>-b"
+          },
+          "body": {
+            "amount": 4000
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "race-refund-<run>-c"
+          },
+          "body": {
+            "amount": 4000
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/payments/{paymentId}/refunds",
+          "headers": {
+            "Authorization": "Bearer sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc",
+            "Idempotency-Key": "race-refund-<run>-d"
+          },
+          "body": {
+            "amount": 4000
+          }
+        }
       ]
       """
     Then exactly 2 responses are 201

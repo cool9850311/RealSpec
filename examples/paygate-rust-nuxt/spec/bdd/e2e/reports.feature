@@ -76,7 +76,7 @@ Feature: The daily report in the browser
     And click "button:@reports.apply"
     Then network request "GET /api/v1/dashboard/reports/daily" responded 200
     And list "testid:report-day" has 2 rows
-    And row 1 of "testid:report-day" contains:
+    And region "testid:report-day-2026-09-17" contains:
       """json
       {
         "testid:day-date":         "2026-09-17",
@@ -168,7 +168,7 @@ Feature: The daily report in the browser
     And click "button:@reports.apply"
     Then network request "GET /api/v1/dashboard/reports/daily" responded 200
     And list "testid:report-day" has 2 rows
-    And row 1 of "testid:report-day" contains:
+    And region "testid:report-day-2026-09-19" contains:
       """json
       {
         "testid:day-date":      "2026-09-19",

@@ -1,0 +1,61 @@
+# Minimal registry for the `step_ref` extension: a combinator whose JSON
+# docstring NAMES other steps of this same registry, so that arranging several
+# things at once composes the existing vocabulary instead of a new step being
+# added for every actor that might take part.
+
+steps:
+
+  - id: run_migration
+    keywords: [Given]
+    pattern: "^run migration$"
+    docstring: ~
+    description: Runs pending migrations.
+
+  - id: http_request
+    keywords: [When]
+    pattern: "^(GET|POST|PUT|PATCH|DELETE) (/api/v1/[a-zA-Z0-9/{}:._?=&%-]+):$"
+    docstring:
+      type: json
+      schema:
+        headers:
+          required: false
+        body:
+          required: false
+    description: Sends an HTTP request.
+
+  - id: worker_runs
+    keywords: [When, And]
+    pattern: "^the worker runs$"
+    docstring: ~
+    description: An action with no body — nameable.
+
+  - id: customer_pays
+    keywords: [When]
+    pattern: "^the customer pays:$"
+    docstring:
+      type: json
+      content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+    description: An action that carries a body — NOT nameable.
+
+  - id: response_status
+    keywords: [Then, And]
+    pattern: "^response status is ([1-5][0-9]{2})$"
+    docstring: ~
+    description: An assertion — NOT nameable.
+
+  - id: things_at_one_instant
+    keywords: [When]
+    pattern: "^these things happen at one instant:$"
+    docstring:
+      type: json
+      schema:
+        "[]":
+          required: true
+          description: >
+            An envelope, or an object whose only key is "step", naming a step of
+            this registry.
+    step_ref:
+      key: step
+      keywords: [When]
+      docstring: none
+    description: Races every element against the others.
