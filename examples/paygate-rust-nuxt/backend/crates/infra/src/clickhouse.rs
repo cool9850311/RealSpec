@@ -389,12 +389,12 @@ pub struct DailyReport {
 /// `⌊ succeeded × 10000 ÷ (succeeded + failed) ⌋`, or `None` when there were
 /// neither (`openapi.yaml`, `getDailyReport`).
 pub fn success_rate_bps(succeeded: u64, failed: u64) -> Option<u32> {
-    let denom = succeeded + failed;
-    if denom == 0 {
-        None
-    } else {
-        Some(((succeeded * 10_000) / denom) as u32)
-    }
+    // `checked_div` is `None` for exactly the case this needs it for: a day
+    // with neither a success nor a failure has no rate, rather than a rate of
+    // zero.
+    (succeeded * 10_000)
+        .checked_div(succeeded + failed)
+        .map(|bps| bps as u32)
 }
 
 fn build_daily_report(

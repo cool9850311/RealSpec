@@ -288,7 +288,7 @@ pub async fn run_pass(
                 .await?;
                 match application.outcome {
                     repo::ReconcileOutcome::Settled => summary.settled += 1,
-                    repo::ReconcileOutcome::Duplicate => {
+                    repo::ReconcileOutcome::Duplicate if candidate.duplicate_auto_refund => {
                         // `settle_from_query` recorded `PaymentDuplicatePaid`
                         // already; giving it back is this function's own
                         // job, the same division of labour the callback path
@@ -301,18 +301,16 @@ pub async fn run_pass(
                         // to deliver, is the smallest correct change
                         // (`spec.md`, "Reconciling what never came back":
                         // "both are safe to repeat").
-                        if candidate.duplicate_auto_refund {
-                            if let Some(amount) = application.duplicate_amount {
-                                repo::create_duplicate_refund(
-                                    &mut tx,
-                                    candidate.merchant.merchant_id,
-                                    application.payment_id,
-                                    application.attempt_id,
-                                    amount,
-                                )
-                                .await?;
-                                summary.duplicate_refunds_queued += 1;
-                            }
+                        if let Some(amount) = application.duplicate_amount {
+                            repo::create_duplicate_refund(
+                                &mut tx,
+                                candidate.merchant.merchant_id,
+                                application.payment_id,
+                                application.attempt_id,
+                                amount,
+                            )
+                            .await?;
+                            summary.duplicate_refunds_queued += 1;
                         }
                     }
                     _ => {}
