@@ -500,8 +500,20 @@ jobs:
       # librdkafka is built from source by rdkafka's cmake-build feature.
       # ubuntu-latest already has cmake and a C++ toolchain; this asserts it
       # rather than discovering it halfway through a compile.
-      - name: Check the build tools librdkafka needs
-        run: cmake --version && c++ --version
+      #
+      # libcurl's headers have to be installed, though, and the reason is worth
+      # writing down because the Docker build never needs them: rdkafka-sys asks
+      # for librdkafka with `-DWITH_CURL=0`, and librdkafka compiles
+      # `rdkafka_conf.c` — which includes <curl/curl.h> — anyway. It only gets
+      # that far when its own configure step finds a libcurl to use, and this
+      # runner ships the library without the headers. Debian's slim base in
+      # backend/Dockerfile has neither, so nothing is found and nothing is
+      # included; only here does the pair come apart.
+      - name: Build tools librdkafka needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+          cmake --version && c++ --version
 
       # Formatting and lints are build failures, not review comments.
       - name: Formatting and lints
