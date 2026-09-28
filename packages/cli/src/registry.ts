@@ -8,9 +8,9 @@
  * documentation only: validate.py never enforces them, and neither does this
  * port. Adding enforcement here would break parity.
  *
- * `context_variables` and `produces` are RealSpec extensions that validate.py
- * has no equivalent for; both are absent from the original project's registry, so the check
- * they drive stays inert there.
+ * `context_variables`, `produces` and `step_ref` are RealSpec extensions that
+ * validate.py has no equivalent for; all three are absent from the original project's
+ * registry, so the checks they drive stay inert there.
  */
 
 import { parse as parseYaml } from 'yaml';
@@ -20,6 +20,23 @@ import { pyCollapseWhitespace } from './parse.js';
 export interface DocstringSpec {
   /** `'sql'` | `'json'`, or `undefined` when the key is absent. */
   readonly type: string | undefined;
+}
+
+/**
+ * The `step_ref:` block of a step definition — the RealSpec extension that lets
+ * one step's JSON docstring NAME other steps of the same registry, so that a
+ * combinator (a step that arranges several things at once) can compose the
+ * registry's own vocabulary instead of a new step being added for each thing
+ * that might take part. `null` when the step declares none, which is every step
+ * in a registry that does not use the extension.
+ */
+export interface StepRefSpec {
+  /** An element object whose ONLY key is this one names a step. */
+  readonly key: string;
+  /** The named step must be declared with every one of these keywords. */
+  readonly keywords: readonly string[];
+  /** `'none'` requires the named step to take no docstring of its own. */
+  readonly docstring: 'none' | 'any';
 }
 
 /** One compiled entry of the step registry. */
@@ -39,6 +56,8 @@ export interface StepDef {
    * resolved from `produces`; `null` when the step saves nothing.
    */
   readonly producesGroup: number | null;
+  /** `step_ref:`, or `null` when this step's docstring names no steps. */
+  readonly stepRef: StepRefSpec | null;
 }
 
 /** A loaded format.yml: the step registry plus its context-variable rules. */
@@ -223,7 +242,41 @@ export function loadRegistry(source: string, origin: string): Registry {
       producesGroup = index + 1;
     }
 
-    compiled.push({ id: idNode, keywords, pattern, docstring, regex, producesGroup });
+    const stepRefNode = entry['step_ref'];
+    let stepRef: StepRefSpec | null = null;
+    if (stepRefNode !== undefined && stepRefNode !== null) {
+      if (!isRecord(stepRefNode)) {
+        throw new RegistryError(`${where}: 'step_ref' must be a mapping`);
+      }
+      if (docstring === null || docstring.type !== 'json') {
+        throw new RegistryError(
+          `${where}: 'step_ref' requires a JSON docstring — there is nowhere else a step could be named`,
+        );
+      }
+      const keyNode = stepRefNode['key'];
+      if (typeof keyNode !== 'string' || keyNode === '') {
+        throw new RegistryError(`${where}: 'step_ref.key' must be a non-empty string`);
+      }
+      const kwNode = stepRefNode['keywords'];
+      let refKeywords: string[] = [];
+      if (kwNode !== undefined && kwNode !== null) {
+        if (!Array.isArray(kwNode) || kwNode.some((k) => typeof k !== 'string')) {
+          throw new RegistryError(`${where}: 'step_ref.keywords' must be a list of strings`);
+        }
+        refKeywords = kwNode as string[];
+      }
+      const dsNode = stepRefNode['docstring'];
+      if (dsNode !== undefined && dsNode !== null && dsNode !== 'none' && dsNode !== 'any') {
+        throw new RegistryError(`${where}: 'step_ref.docstring' must be 'none' or 'any'`);
+      }
+      stepRef = {
+        key: keyNode,
+        keywords: refKeywords,
+        docstring: dsNode === 'none' ? 'none' : 'any',
+      };
+    }
+
+    compiled.push({ id: idNode, keywords, pattern, docstring, regex, producesGroup, stepRef });
   }
 
   return { steps: compiled, providedVars };

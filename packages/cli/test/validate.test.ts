@@ -426,3 +426,70 @@ describe('22. context variables', () => {
     expect(registry.steps.every((s) => s.producesGroup === null)).toBe(true);
   });
 });
+
+describe('case 23 — step_ref: a docstring that names steps of the same registry', () => {
+  const case23 = (file: string): Violation[] => violationsOf('case23-step-ref', file);
+
+  it('accepts an element naming an action of this registry', () => {
+    expect(case23('x.feature')).toEqual([]);
+  });
+
+  it('refuses a sentence no step matches', () => {
+    expect(case23('unknown.feature')).toEqual([
+      {
+        file: 'unknown.feature',
+        line: 4,
+        step: 'these things happen at one instant:',
+        message: `'step' names "the worker sprints", which is not a step in this registry`,
+      },
+    ]);
+  });
+
+  it('refuses an assertion: only an action can take part in a race', () => {
+    expect(case23('assertion.feature')[0]?.message).toBe(
+      `'step' names step 'response_status', which is not declared with ['When'] — ` +
+        'only such steps may be named here',
+    );
+  });
+
+  it('refuses a step that carries a docstring of its own', () => {
+    expect(case23('carries-a-body.feature')[0]?.message).toBe(
+      `'step' names step 'customer_pays', which takes a docstring of its own — ` +
+        'a step named here carries no body, so it cannot be one that needs one',
+    );
+  });
+
+  it('refuses the combinator naming itself, for the same reason', () => {
+    // It has a docstring, so the docstring rule excludes it without a rule of
+    // its own — recursion is impossible by construction, not by prohibition.
+    expect(case23('names-itself.feature')[0]?.message).toContain(
+      `names step 'things_at_one_instant', which takes a docstring of its own`,
+    );
+  });
+
+  it('leaves a request body alone, even one carrying a field of that name', () => {
+    expect(case23('not-a-name.feature')).toEqual([]);
+    expect(case23('inside-an-envelope.feature')).toEqual([]);
+  });
+
+  it('is inert for a registry that declares no step_ref', () => {
+    const registry = loadRegistry(
+      readFileSync(path.join(dir('case13-http-empty-object'), 'format.yml'), 'utf8'),
+      'format.yml',
+    );
+    expect(registry.steps.every((s) => s.stepRef === null)).toBe(true);
+  });
+
+  it('refuses a step_ref on a step with no JSON docstring to name anything in', () => {
+    const bad = [
+      'steps:',
+      '  - id: nowhere',
+      '    keywords: [When]',
+      '    pattern: "^nowhere$"',
+      '    docstring: ~',
+      '    step_ref: { key: step }',
+      '    description: x',
+    ].join('\n');
+    expect(() => loadSteps(bad, 'format.yml')).toThrow(/requires a JSON docstring/);
+  });
+});

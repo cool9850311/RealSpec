@@ -1,0 +1,176 @@
+# For a human at a keyboard. The test suites never run this file — they build
+# the same image from the same Dockerfile and start their containers with
+# Testcontainers, one stack per scenario (spec.md, "Isolation").
+#
+#   cd examples/paygate-rust-nuxt
+#   docker compose -f local/docker-compose.yml up --build
+#   open https://127.0.0.1:8443/shop
+#
+# Run local/certs/generate.sh once first — the certificate is generated and
+# never committed. It is self-signed, so a browser warns once.
+
+name: paygate
+
+x-image: &image
+  build:
+    context: ..
+    dockerfile: backend/Dockerfile
+  image: paygate:local
+
+x-backend-env: &backend-env
+  LOG_LEVEL: debug
+  DB_DSN: postgres://paygate:paygate@postgres:5432/paygate?sslmode=disable
+  REDIS_URL: redis://redis:6379
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_DATABASE: paygate
+  CLICKHOUSE_USER: default
+  CLICKHOUSE_PASSWORD: ""
+  KAFKA_BROKERS: kafka:9092
+  KAFKA_TOPIC: paygate.payment-events.v1
+  KAFKA_GROUP_ID: paygate-reports
+  KAFKA_TOPIC_PARTITIONS: "3"
+  PROVIDER_BASE_URL: http://provider-mock:8080
+  MERCHANT_BASE_URL: http://demo-merchant:8080
+  PUBLIC_BASE_URL: https://caddy:8443
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: paygate
+      POSTGRES_PASSWORD: paygate
+      POSTGRES_DB: paygate
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paygate -d paygate"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  kafka:
+    image: apache/kafka-native:3.9.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Off on purpose: a topic that appears with whatever `num.partitions`
+      # happened to be set to is not a schema. `paygate-worker relay` creates it
+      # at startup with KAFKA_TOPIC_PARTITIONS, idempotently, so any number of
+      # replicas may start at once (spec.md, "Kafka"). There is no kafka-topics.sh
+      # to run here either — the -native image is a GraalVM binary with no shell
+      # scripts at all.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    environment:
+      CLICKHOUSE_DB: paygate
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping | grep -q Ok"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  provider-mock:
+    <<: *image
+    command: ["paygate-provider-mock"]
+    environment:
+      LOG_LEVEL: debug
+      PROVIDER_CALLBACK_URLS: http://api:8080
+      # The same pair the `providers` rows carry — the mock verifies what paygate
+      # signs, so the two have to have been issued the same credentials.
+      ECPAY_PLATFORM_ID: "3002607"
+      ECPAY_HASH_KEY: pwFHCqoQZGmho4w6
+      ECPAY_HASH_IV: EkRm7iFT261dpevs
+      NEWEBPAY_PLATFORM_ID: MS12345678
+      NEWEBPAY_HASH_KEY: Fs5cX1TGqYZ3kLmN8pQrS2tUvW4xY6zA
+      NEWEBPAY_HASH_IV: B7cD9eF1gH3iJ5kL
+
+  api:
+    <<: *image
+    command: ["paygate-api"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+    environment:
+      <<: *backend-env
+      SCHEMA_AUTO_MIGRATE: "true"
+      PROVIDER_TRADE_NO_PREFIX: PG
+      COOKIE_SECURE: "true"
+      FRONTEND_ORIGIN: https://127.0.0.1:8443
+
+  relay:
+    <<: *image
+    command: ["paygate-worker", "relay"]
+    depends_on: [api, kafka]
+    environment: *backend-env
+
+  ingester:
+    <<: *image
+    command: ["paygate-worker", "ingest"]
+    depends_on: [api, kafka, clickhouse]
+    environment: *backend-env
+
+  notifier:
+    <<: *image
+    command: ["paygate-worker", "notify"]
+    depends_on: [api]
+    environment: *backend-env
+
+  reconciler:
+    <<: *image
+    command: ["paygate-worker", "reconcile"]
+    depends_on: [api]
+    environment: *backend-env
+
+  demo-merchant:
+    <<: *image
+    command: ["paygate-demo-merchant"]
+    depends_on: [api]
+    environment:
+      LOG_LEVEL: debug
+      GATEWAY_URL: http://api:8080
+      DEMO_MERCHANT_API_KEY: sk_test_acme_4eC39HqLyjWDarjtT1zdp7dc
+      MERCHANT_HASH_KEY: acmehashkey0123456789abcdef01234
+      MERCHANT_HASH_IV: acmehashiv012345
+      # /notify-slow answers correctly but just after the notifier's deadline,
+      # so it has to be told the same deadline the notifier uses.
+      NOTIFY_TIMEOUT_MS: "2000"
+
+  # The SPA is static, so Caddy serves it straight from the build output.
+  # Run `npm ci && npm run generate` in ../frontend first.
+  caddy:
+    image: caddy:2-alpine
+    depends_on: [api, provider-mock, demo-merchant]
+    ports: ["8443:8443"]
+    environment:
+      API_UPSTREAMS: api:8080
+      PROVIDER_UPSTREAM: provider-mock:8080
+      MERCHANT_UPSTREAM: demo-merchant:8080
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Run ./certs/generate.sh once; the files are generated, never committed.
+      - ./certs/cert.pem:/etc/caddy/certs/cert.pem:ro
+      - ./certs/key.pem:/etc/caddy/certs/key.pem:ro
+      - ../frontend/.output/public:/srv:ro

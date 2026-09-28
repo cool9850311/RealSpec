@@ -5,7 +5,8 @@
   "workspaces": [
     "packages/*",
     "examples/minimart-go-nuxt/frontend",
-    "examples/minimart-java-next/frontend"
+    "examples/minimart-java-next/frontend",
+    "examples/paygate-rust-nuxt/frontend"
   ],
   "scripts": {
     "build": "npm run build -w @realspec/cli",

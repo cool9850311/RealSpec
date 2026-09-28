@@ -9,9 +9,30 @@ playwright-report/
 .features-gen/
 .playwright-mcp/
 
+# Rust build output. `target/` anywhere, because an example's workspace and its
+# BDD harness are two workspaces and each grows its own — together 11 GB of
+# compiled artefacts for one example, none of it reproducible-by-inspection and
+# all of it rebuilt by `cargo build`. Cargo.lock IS committed: the examples are
+# applications, so the exact versions a green run used are part of what makes it
+# reproducible.
+target/
+
 # Run output, all of it. Logs, traces, container output, and the Markdown
 # summaries written on top of them — every file in here is a record of one
 # execution on one machine, and goes stale the moment anything changes. The
 # reasoning worth keeping was written into the code, the spec and PLAN.md as it
 # was found, which is where a reader will actually look for it.
 reports/
+
+# The paygate example's documentation is one file, and it is the specification.
+# Everything else written about it in Markdown — the build contract its
+# implementers worked from, the planning record, any summary of a run — is an
+# account of how it was made rather than of what it is, and every one of those
+# goes stale the moment the code moves. The reasoning worth keeping was written
+# into the code and into spec.md itself, which is where a reader will look.
+examples/paygate-rust-nuxt/**/*.md
+!examples/paygate-rust-nuxt/spec/spec.md
+
+# Local presentation deck and the Slidev agent skill used to build it
+slides/
+.claude/skills/slidev/

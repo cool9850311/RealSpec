@@ -1,0 +1,355 @@
+openapi: "3.1.0"
+
+info:
+  title: paygate demo merchant
+  version: "1.0.0"
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  description: |
+    NOT paygate. A minimal MERCHANT, shipped with the example so that the whole
+    integration can be exercised end to end: a shop that creates orders with its
+    secret API key, and a server that receives paygate's callbacks.
+
+    It is also where the merchant's side of the contract is written down, which
+    is why this file carries the **callback** paygate sends — the one thing in
+    the system whose receiver is not paygate.
+
+    Three things it demonstrates by existing:
+
+    - **It renders the payment form itself.** `POST /api/v1/payments` hands it a
+      provider URL and a signed set of fields; its own page at
+      `/shop/pay/{merchantTradeNo}` writes them into a hidden form and submits it.
+      This is what ECPay's WooCommerce plugin does in `receipt_page()`, and it is
+      why paygate needs no page and no endpoint that a browser calls.
+    - **It never sees a card number**, and neither does paygate. The card is typed
+      at the provider, two origins away from this server.
+    - **It answers `1|OK`.** Anything else means paygate calls again — and the
+      `notify-*` endpoints exist so that "anything else" can be stated as data: a
+      signature checker, a flaky one, one that never accepts, one that answers
+      `200` with the wrong body, one that answers the RIGHT body with a newline
+      after it, and one that answers correctly but too late. What this
+      merchant does for paygate, paygate does for its providers — the same
+      contract, one level up.
+
+    Served behind the same reverse proxy at `/demo-merchant/api`, with its pages
+    at `/shop` and `/shop/result`.
+
+servers:
+  - url: "https://{host}/demo-merchant/api"
+    variables:
+      host: { default: 127.0.0.1 }
+
+paths:
+
+  /orders:
+    post:
+      operationId: shopCreateOrder
+      summary: Start a purchase
+      description: |
+        Called by `/shop` when the customer clicks Checkout. The merchant
+        allocates its own order number, calls `POST /api/v1/payments` on paygate
+        with its API key and an `Idempotency-Key`, and stores both what it got
+        back and the **form** paygate signed for it.
+
+        The customer is then sent to the merchant's OWN payment page, which is
+        where that form is rendered and submitted. Nothing about this hands the
+        browser off to paygate.
+
+        The merchant's own record of the order never contains card data, because
+        it never has any: what it sends paygate is an amount and two URLs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [amount]
+              properties:
+                amount:
+                  type: string
+                  pattern: "^[0-9]+(\\.[0-9]{1,2})?$"
+                  example: "12.50"
+      responses:
+        "201":
+          description: Order created at paygate; go to this merchant's payment page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [merchant_trade_no, pay_url]
+                properties:
+                  merchant_trade_no: { type: string }
+                  pay_url:
+                    type: string
+                    description: >
+                      This merchant's own page — `/shop/pay/{merchantTradeNo}`.
+                      Not paygate's: paygate serves no page at all.
+                    example: /shop/pay/ACME-000123
+        "502":
+          description: paygate could not be reached or refused the order
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, const: GATEWAY_UNAVAILABLE }
+
+  /orders/{merchantTradeNo}/form:
+    get:
+      operationId: shopGetPaymentForm
+      summary: The provider form for this order, for the shop's own page to submit
+      tags: []
+      description: |
+        Read by `/shop/pay/{merchantTradeNo}`. The merchant returns what paygate
+        signed — the provider's URL and the exact fields — and its page posts them
+        to that URL.
+
+        Asking again mints a new one: the merchant calls `POST /api/v1/payments`
+        with the same `merchant_trade_no`, which ECPay's rule makes a NEW provider
+        order number (paygate's `createOrder`). A paid order has no form, and
+        answers `409`.
+      parameters:
+        - name: merchantTradeNo
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Submit this to the provider
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [action, fields]
+                properties:
+                  action: { type: string }
+                  fields:
+                    type: object
+                    additionalProperties: { type: string }
+        "409":
+          description: The order is paid; there is nothing to submit
+        "404":
+          description: No such order
+
+  /orders/{merchantTradeNo}:
+    get:
+      operationId: shopGetOrder
+      summary: What the merchant believes about one of its orders
+      description: |
+        Read by `/shop/result` after the provider sends the customer back, and
+        polled by it while the answer is still `awaiting_payment`. The merchant's
+        own record — updated by paygate's callback, not by the redirect, because a
+        browser's return is not evidence that a payment happened.
+      parameters:
+        - name: merchantTradeNo
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The merchant's record
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [merchant_trade_no, status, amount]
+                properties:
+                  merchant_trade_no: { type: string }
+                  status: { type: string, enum: [awaiting_payment, paid, refunded] }
+                  amount: { type: integer }
+                  trade_no: { type: [string, "null"] }
+                  last_attempt_status:
+                    type: string
+                    enum: [redirected, succeeded, failed, abandoned]
+                    description: |
+                      **Addition, not in the original schema.** paygate deliberately tells a
+                      merchant nothing when an attempt merely fails (spec.md: "A failed attempt
+                      leaves the order payable and tells the merchant nothing"), yet the shop's
+                      own `/shop/result` page must be able to say "Payment failed" without
+                      waiting on a callback that will never come. So while this merchant's own
+                      `status` is still `awaiting_payment`, this endpoint asks paygate itself —
+                      `GET /api/v1/payments/{paymentId}`, with this merchant's own API key — and
+                      passes its `last_attempt.status` straight through. Absent (never `null`)
+                      once `status` is no longer `awaiting_payment`, or when paygate could not be
+                      asked, or when it had no `last_attempt` to report.
+        "404":
+          description: No such order
+
+  /notify:
+    post:
+      operationId: receiveNotification
+      summary: Receive paygate's result callback (the happy path)
+      description: |
+        **This is the contract paygate implements** — and the one it is held to
+        one level up, by its own providers. Modelled on ECPay's ReturnURL:
+        `application/x-www-form-urlencoded`, and the merchant must answer with
+        the body `1|OK` — exactly that, not merely a `200`.
+
+        Anything else is a failed delivery: paygate backs off and calls again,
+        up to `NOTIFY_MAX_ATTEMPTS`, and then gives up and logs it. Delivery is
+        at-least-once, so a merchant deduplicates on `MerchantTradeNo`, which it
+        already has.
+
+        This endpoint accepts and answers `1|OK` without checking the signature
+        — which is what makes `/notify-strict` a meaningful counterpart rather
+        than a duplicate.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/Notification" }
+      responses:
+        "200":
+          description: Acknowledged
+          content:
+            text/plain:
+              schema: { type: string, const: "1|OK" }
+
+  /notify-strict:
+    post:
+      operationId: receiveNotificationStrict
+      summary: Receive the callback, verifying CheckMacValue first
+      description: |
+        Recomputes `CheckMacValue` — SHA-256 over the other parameters sorted by
+        name and wrapped in the merchant's `HashKey` and `HashIV` — and answers
+        `1|OK` only if it matches, `400` otherwise.
+
+        A delivery this endpoint accepted is therefore proof that the signature
+        was right, which is how `notify.feature` asserts the signing without a
+        step that can compute a hash.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/Notification" }
+      responses:
+        "200":
+          description: Signature verified
+          content:
+            text/plain:
+              schema: { type: string, const: "1|OK" }
+        "400":
+          description: Signature did not verify
+
+  /notify-flaky:
+    post:
+      operationId: receiveNotificationFlaky
+      summary: Fail twice, then acknowledge
+      description: >
+        A merchant having a bad afternoon. Exists so that a scenario can state
+        "retried and eventually delivered" as data rather than as a mock setup.
+      responses:
+        "200": { description: Acknowledged, on the third attempt }
+        "500": { description: The first two attempts }
+
+  /notify-loose:
+    post:
+      operationId: receiveNotificationLoose
+      summary: Answer 200 with `1|OK` and a little extra
+      description: >
+        Answers `200` with the body `"1|OK\n"` — the right string with trailing
+        whitespace. It exists because "the body starts with 1|OK" and "the body IS
+        1|OK" are different comparisons, and the second is the one ECPay specifies
+        and its own plugin performs (`echo '1|OK'; exit;`, compared exactly). A
+        gateway that trims, lowercases or prefix-matches here silently accepts
+        merchants that never acknowledged anything, and notices in a reconciliation
+        months later.
+      responses:
+        "200":
+          description: Not an acknowledgement, however close it looks
+          content:
+            text/plain:
+              schema: { type: string, const: "1|OK\n" }
+
+  /notify-slow:
+    post:
+      operationId: receiveNotificationSlow
+      summary: Answer `1|OK`, but only after the notifier has given up
+      description: >
+        Holds the connection open past `NOTIFY_TIMEOUT_MS` and then answers
+        `1|OK`. The answer is correct and it arrives too late, which is a failed
+        delivery: a notifier that waited would be held hostage by one slow
+        merchant, and one that counted it as delivered would lose the order.
+      responses:
+        "200":
+          description: Acknowledged, eventually, and by then it does not count
+          content:
+            text/plain:
+              schema: { type: string, const: "1|OK" }
+
+  /notify-reject:
+    post:
+      operationId: receiveNotificationReject
+      summary: Always fail
+      description: A merchant that is down for longer than paygate is willing to retry.
+      responses:
+        "500": { description: Always }
+
+  /notify-mumble:
+    post:
+      operationId: receiveNotificationMumble
+      summary: Answer 200 with the wrong body
+      description: >
+        Answers `200` with `0|ERROR`. The point of its existence: "the endpoint
+        answered" and "the merchant accepted" are different facts, and a gateway
+        that treats the first as the second loses orders quietly.
+      responses:
+        "200":
+          description: Not an acknowledgement
+          content:
+            text/plain:
+              schema: { type: string, const: "0|ERROR" }
+
+  /__deliveries:
+    get:
+      operationId: getDeliveryLog
+      summary: This merchant's own delivery log — an addition, not part of the original schema
+      description: |
+        **Addition, not in the original schema.** The registry step `merchant received <n>
+        notifications at "<path>"` (`spec/bdd/format.yml`) needs a count of deliveries per
+        `notify*` path, and until this endpoint existed there was nowhere to read one from. It is
+        the merchant's own log, not paygate's — a fact this merchant records about calls it
+        received, the same way `payment provider received <n> requests` reads the payment
+        provider's own request log — so exposing it breaks no rule about what paygate may know
+        about itself.
+
+        Counted from process start, per path, in delivery order.
+      responses:
+        "200":
+          description: Every delivery this process has received, grouped by the path it arrived on
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: array
+                  items:
+                    type: object
+                    required: [received_at, body, answered]
+                    properties:
+                      received_at: { type: string, format: date-time }
+                      body:
+                        type: object
+                        additionalProperties: { type: string }
+                        description: The delivery's form fields, url-decoded.
+                      answered:
+                        type: string
+                        description: The exact body this merchant answered with.
+
+components:
+  schemas:
+    Notification:
+      type: object
+      description: ECPay's shape, plus the signature over it.
+      required: [MerchantID, MerchantTradeNo, TradeNo, RtnCode, RtnMsg, TradeAmt, PaymentDate, CheckMacValue]
+      properties:
+        MerchantID: { type: string }
+        MerchantTradeNo: { type: string, description: The merchant's own order number. }
+        TradeNo: { type: string, description: paygate's trade number. }
+        RtnCode: { type: integer, description: "1 = paid; anything else is a failure." }
+        RtnMsg: { type: string, enum: [paid, failed, refunded] }
+        TradeAmt: { type: integer, description: The amount paid, or the amount refunded. }
+        PaymentDate: { type: string, example: "2026/09/21 14:03:11" }
+        CheckMacValue: { type: string, description: SHA-256 over the sorted parameters wrapped in HashKey/HashIV. }

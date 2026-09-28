@@ -1,0 +1,67 @@
+# One origin in front of everything, which is what makes the example's URLs
+# paths rather than addresses: a payment's `notify_url` and `client_back_url`
+# are paths on THIS proxy, so there is no address a merchant could point paygate
+# at and no SSRF surface to defend (spec.md, "Telling the merchant").
+#
+# The e2e stack runs this; the API stack does not, and resolves the same paths
+# against the container it means (PROVIDER_BASE_URL, MERCHANT_BASE_URL).
+
+{
+	admin off
+	# The certificate comes from the `tls` directive below, so Caddy must not
+	# reach for ACME, and must not add an HTTP->HTTPS redirect vhost: the e2e
+	# stack publishes only the HTTPS port.
+	auto_https off
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+# The site is named by PORT ONLY, and served with a certificate from
+# `local/certs/generate.sh`. Both halves of that are load-bearing, and both were
+# arrived at the hard way.
+#
+# `tls internal` cannot work here. Every scenario is reached at
+# `https://127.0.0.1:<its own published port>`, and a TLS client sends no SNI for
+# an IP address, so Caddy's internal CA has no name to issue for: the handshake
+# dies with `tlsv1 alert internal error`. The generated certificate's SAN is the
+# loopback ADDRESS instead, which needs no name to resolve and covers every
+# scenario at once.
+#
+# And the block must not name a host. Caddy selects a certificate by SNI, so
+# `https://127.0.0.1:8443 { tls … }` still fails on a connection that carries no
+# SNI — supplying the file is not enough if Caddy has nothing to match it
+# against. A block with only a port matches every request whatever the SNI, and
+# serves the one certificate it was given.
+:8443 {
+	tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem
+
+	encode zstd gzip
+
+	# paygate's own API. Nothing a customer's browser calls lives here.
+	handle /api/v1/* {
+		reverse_proxy {$API_UPSTREAMS}
+	}
+
+	# The payment provider: its cashiers, its issuer 3-D Secure pages, and the
+	# control surface that exists only on the mock.
+	handle /provider/* {
+		reverse_proxy {$PROVIDER_UPSTREAM}
+	}
+
+	# The merchant's own server — the shop API and the endpoints that receive
+	# paygate's callbacks.
+	handle /demo-merchant/api/* {
+		reverse_proxy {$MERCHANT_UPSTREAM}
+	}
+
+	# Everything else is the static SPA: paygate's /login and /reports, and the
+	# merchant's /shop pages. `/shop/pay/<merchantTradeNo>` cannot be prerendered
+	# — the order numbers are unbounded — so an unmatched path falls back to
+	# Nuxt's SPA shell and the app routes it on the client.
+	handle {
+		root * /srv
+		try_files {path} {path}/index.html /200.html /index.html
+		file_server
+	}
+}

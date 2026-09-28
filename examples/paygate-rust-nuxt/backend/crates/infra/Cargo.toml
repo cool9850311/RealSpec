@@ -1,0 +1,38 @@
+[package]
+name = "paygate-infra"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+paygate-domain = { workspace = true }
+paygate-provider = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+redis = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_urlencoded = { workspace = true }
+form_urlencoded = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+# The crate's own integration tests start real PostgreSQL, Redis and ClickHouse.
+# Same rule as every other suite in this example: the library owns the container
+# lifecycle and nothing here hand-rolls one (spec.md, "Isolation").
+testcontainers = { version = "0.25", features = ["http_wait"] }
+testcontainers-modules = { version = "0.13", features = ["postgres", "redis", "clickhouse"] }

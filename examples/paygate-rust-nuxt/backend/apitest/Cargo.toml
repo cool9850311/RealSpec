@@ -1,0 +1,47 @@
+[package]
+name = "paygate-apitest"
+version = "1.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+# Its own workspace: `cargo test --workspace` in ../ builds the services, and
+# this suite is run on its own. Keeping it out is also what keeps rdkafka — and
+# therefore cmake — off the path of anyone who only wants to run the suite.
+[workspace]
+
+[[test]]
+name = "api"
+path = "tests/api.rs"
+harness = false
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+cucumber = "0.23"
+form_urlencoded = "1"
+futures = "0.3"
+num_cpus = "1"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "cookies"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4", "with-uuid-1"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+urlencoding = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# `http_wait` only. The `watchdog` feature looks like the answer to a killed run —
+# it is the library's nearest thing to a reaper, since testcontainers-rs has no
+# Ryuk (still an open request, testcontainers/testcontainers-rs#577, absent even
+# from 0.28) — but it was tried here and does not work: with a full stack running
+# and the watchdog thread long since started, SIGTERM left all eleven containers
+# in place thirty seconds later. Its own doc says it "may panic", and its thread
+# locks the very `static` it is being initialised inside. Enabling it would buy a
+# signal handler and a background thread for nothing.
+testcontainers = { version = "0.25", features = ["http_wait"] }
+testcontainers-modules = { version = "0.13", features = ["postgres", "redis", "kafka", "clickhouse"] }
