@@ -1,9 +1,13 @@
 /**
- * The §6.A CLI test plan, cases 1–20, plus case 22 for the context-variable
- * check. Case 21 (parity against validate.py) lives in parity.test.ts.
+ * The CLI test plan, cases 1–20, plus case 22 for the context-variable check and
+ * case 23 for `step_ref`.
  *
- * Every expectation here was pinned by running the original project's validate.py over
- * the same fixture with the same format.yml — validate.py is the specification.
+ * Each case is a directory under fixtures/ holding a format.yml and one or more
+ * feature files. The expectations are the validator's own contract: the message
+ * texts, the line each violation is reported against and the exit codes. Every
+ * rule a case exercises is declared in that case's format.yml (the SELECT rule
+ * of case 10 and 11, the allowed keys of case 12), which is why the rules can be
+ * checked here without the validator knowing any of them.
  */
 
 import { readFileSync } from 'node:fs';
@@ -11,9 +15,9 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import { checkSql, pyReprStrList, pyReprStrSet, pySorted, validate, type Violation } from '../src/checks.js';
+import { pyReprStrList, pyReprStrSet, pySorted, validate, type Violation } from '../src/checks.js';
 import { parseSteps } from '../src/parse.js';
-import { loadRegistry, loadSteps } from '../src/registry.js';
+import { loadRegistry, loadSteps, type Registry } from '../src/registry.js';
 import { run } from '../src/cli.js';
 
 const FIXTURES = fileURLToPath(new URL('./fixtures/', import.meta.url));
@@ -24,12 +28,30 @@ const dir = (name: string): string => path.join(FIXTURES, name);
 function violationsOf(name: string, file = 'x.feature'): Violation[] {
   const base = dir(name);
   const registry = loadRegistry(readFileSync(path.join(base, 'format.yml'), 'utf8'), 'format.yml');
-  return validate(
-    file,
-    readFileSync(path.join(base, file), 'utf8'),
-    registry.steps,
-    registry.providedVars,
-  );
+  return validate(file, readFileSync(path.join(base, file), 'utf8'), registry);
+}
+
+/** Load a fixture's registry, for the tests that validate a source built in place. */
+function registryOf(name: string): Registry {
+  return loadRegistry(readFileSync(path.join(dir(name), 'format.yml'), 'utf8'), 'format.yml');
+}
+
+/**
+ * Validate a one-step feature whose docstring is `body`, through the registry
+ * of fixture `name`. `header` is the step line, e.g. `Then in PostgreSQL:`.
+ */
+function docstringViolations(name: string, header: string, marker: string, body: string): Violation[] {
+  const source = [
+    'Feature: f',
+    '',
+    '  Scenario: s',
+    `    ${header}`,
+    `      """${marker}`,
+    ...body.split('\n').map((line) => `      ${line}`),
+    '      """',
+    '',
+  ].join('\n');
+  return validate('f.feature', source, registryOf(name));
 }
 
 /** Run the CLI inside a fixture directory, letting it discover format.yml. */
@@ -136,38 +158,41 @@ describe('10. query-assertion SQL that is not a SELECT', () => {
 });
 
 describe('11. what may precede SELECT', () => {
+  const QUERY = 'Then in PostgreSQL query returns 1 rows:';
+  const MESSAGE = 'SQL in a query-assertion step must begin with SELECT';
+
   it('rejects a leading SQL comment but accepts a plain SELECT', () => {
-    // The plan's table said "whitespace and a comment, then SELECT → PASS".
-    // validate.py's `^\s*SELECT\b` allows only whitespace, so the commented
-    // variant is a violation; validate.py is the authority.
+    // `must_match` is `^\s*[Ss][Ee][Ll][Ee][Cc][Tt]\b`: whitespace may precede
+    // SELECT, a comment may not.
     const v = violationsOf('case11-sql-select-prefix');
     expect(v).toHaveLength(1);
     expect(v[0]?.line).toBe(8);
-    expect(v[0]?.message).toBe('SQL in a query-assertion step must begin with SELECT');
+    expect(v[0]?.message).toBe(MESSAGE);
   });
 
-  it('accepts leading whitespace before SELECT', () => {
-    // A docstring body is .strip()ed before it reaches the check, so this is
-    // only reachable at the unit level — but the rule is still the rule.
-    expect(checkSql('   \t\n SELECT 1', 'postgresql_query_returns')).toBeNull();
-    expect(checkSql('select 1', 'postgresql_query_returns')).toBeNull();
-    expect(checkSql('SELECTED 1', 'postgresql_query_returns')).toBe(
-      'SQL in a query-assertion step must begin with SELECT',
-    );
-    expect(checkSql('-- c\nSELECT 1', 'postgresql_query_returns')).toBe(
-      'SQL in a query-assertion step must begin with SELECT',
-    );
+  it('accepts SELECT in any letter case, and rejects a word that merely starts with it', () => {
+    const fixture = 'case11-sql-select-prefix';
+    expect(docstringViolations(fixture, QUERY, 'sql', 'select 1')).toEqual([]);
+    expect(docstringViolations(fixture, QUERY, 'sql', 'SeLeCt 1')).toEqual([]);
+    expect(docstringViolations(fixture, QUERY, 'sql', 'SELECTED 1').map((v) => v.message)).toEqual([
+      MESSAGE,
+    ]);
+    expect(docstringViolations(fixture, QUERY, 'sql', '-- c\nSELECT 1').map((v) => v.message)).toEqual([
+      MESSAGE,
+    ]);
   });
 
-  it('applies the SELECT rule only to query-assertion steps', () => {
-    expect(checkSql('DELETE FROM t', 'exec_postgresql')).toBeNull();
-    expect(checkSql('DELETE FROM t', 'clickhouse_query_returns')).toBe(
-      'SQL in a query-assertion step must begin with SELECT',
-    );
+  it('applies the SELECT rule only to the step whose format.yml entry declares it', () => {
+    const fixture = 'case11-sql-select-prefix';
+    expect(docstringViolations(fixture, 'Given in PostgreSQL:', 'sql', 'DELETE FROM t')).toEqual([]);
+    expect(docstringViolations(fixture, QUERY, 'sql', 'DELETE FROM t').map((v) => v.message)).toEqual([
+      MESSAGE,
+    ]);
   });
 
   it('rejects an empty SQL docstring', () => {
-    expect(checkSql('   ', 'exec_postgresql')).toBe('SQL docstring must not be empty');
+    const v = docstringViolations('case11-sql-select-prefix', 'Given in PostgreSQL:', 'sql', '   ');
+    expect(v.map((x) => x.message)).toEqual(['SQL docstring must not be empty']);
   });
 });
 
@@ -221,7 +246,7 @@ describe('16. comments and blank lines', () => {
 });
 
 describe('17. triple-quote variants inside a docstring body', () => {
-  it('behaves exactly as validate.py does', () => {
+  it('keeps a mid-line """ in the body and closes on a line that starts with """', () => {
     const v = violationsOf('case17-triple-quote');
     expect(v).toHaveLength(2);
     // A bare `"""` in the middle of a body line stays part of the body.
@@ -352,25 +377,62 @@ describe('20. bad invocations and bad registries', () => {
 });
 
 describe('documentation-only registry fields', () => {
-  it('never enforces content_pattern, captures, schema or special_values', () => {
-    // The fixture registry gives postgresql_query_returns a content_pattern of
-    // `^(?!\s*$)\s*SELECT\s[\s\S]+$`; `SELECT 1` has no whitespace after
-    // SELECT... and yet validate.py accepts it, because it ignores the field.
+  const feature = (lines: string[]): string =>
+    ['Feature: f', '', '  Scenario: s', ...lines, ''].join('\n');
+
+  it('never enforces content_pattern, schema or special_values', () => {
+    const registry = registryOf('case07-ctx-var');
+
+    // content_pattern of postgresql_query_returns is `^(?!\s*$)\s*SELECT\s[\s\S]+$`;
+    // `SELECT 1` has no whitespace after SELECT... and passes, because the field
+    // is documentation. `must_match` is what enforces, and it is satisfied.
+    expect(
+      validate(
+        'f.feature',
+        feature(['    Then in PostgreSQL query returns 1 rows:', '      """sql', '      SELECT 1', '      """']),
+        registry,
+      ),
+    ).toEqual([]);
+
+    // response_body_contains has a content_pattern that rejects blank content
+    // and a special_values token; neither is looked at. A value that the token
+    // does not describe passes, and so does `{}`.
+    expect(
+      validate(
+        'f.feature',
+        feature(['    Then response body contains:', '      """json', '      {"anything": "at all"}', '      """']),
+        registry,
+      ),
+    ).toEqual([]);
+
+    // http_request declares a `schema` requiring nothing; a key the schema does
+    // not mention is refused only because allowed_top_level_keys says so.
+    const v = validate(
+      'f.feature',
+      feature(['    When GET /api/v1/items:', '      """json', '      {"query": {}}', '      """']),
+      registry,
+    );
+    expect(v.map((x) => x.message)).toEqual([
+      "http_request docstring has unexpected top-level keys: {'query'}",
+    ]);
+  });
+
+  it('is never read at load time, so an unparseable content_pattern is harmless', () => {
     const steps = loadSteps(
-      readFileSync(path.join(dir('case07-ctx-var'), 'format.yml'), 'utf8'),
+      [
+        'steps:',
+        '  - id: a',
+        '    keywords: [Given]',
+        '    pattern: a',
+        '    docstring:',
+        '      type: sql',
+        "      content_pattern: '('",
+        '      schema: {x: 1}',
+        '      special_values: [{token: t}]',
+      ].join('\n'),
       'format.yml',
     );
-    const source = [
-      'Feature: f',
-      '',
-      '  Scenario: s',
-      '    Then in PostgreSQL query returns 1 rows:',
-      '      """sql',
-      '      SELECT 1',
-      '      """',
-      '',
-    ].join('\n');
-    expect(validate('f.feature', source, steps)).toEqual([]);
+    expect(steps[0]?.docstring?.mustMatch).toBeNull();
   });
 });
 

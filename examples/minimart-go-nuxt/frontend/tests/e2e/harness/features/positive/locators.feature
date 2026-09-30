@@ -7,8 +7,8 @@ Feature: The three locator forms
 
   The two locale scenarios are written out rather than folded into a Scenario
   Outline: `realspec validate` normalises every `<param>` to one placeholder
-  before matching (that is `validate.py`'s behaviour, which the CLI is a
-  byte-compatible port of), so a step whose capture is as narrow as
+  before matching (that is the validator's behaviour, and it applies to every
+  feature), so a step whose capture is as narrow as
   `[a-z]{2}_[A-Z]{2}` cannot be parameterised by an Examples column. Two
   scenarios are four lines longer and they validate.
 

@@ -1,41 +1,44 @@
 /**
- * checks.ts — content validators and the core validator loop.
+ * checks.ts — docstring checks and the core validator loop.
  *
- * Port of `_check_json()`, `_check_http_body()`, `_check_sql()` and
- * `validate()` in the original `validate.py`.
+ * Nothing in here knows a step id, a path prefix or a special value. Every rule
+ * the validator enforces is read from the {@link Registry}: the substitutions
+ * that rewrite a docstring before it is checked, each step's `must_match` and
+ * `allowed_top_level_keys`, its `step_ref`, its `openapi` binding and the
+ * registry's context variables. Changing what is enforced is a change to
+ * format.yml, never to this file.
  *
- * The JSON error messages produced here must be byte-identical to CPython's
- * `json.JSONDecodeError`, so this module carries a faithful re-implementation
- * of CPython's JSON scanner (`Lib/json/decoder.py` + the `_json` C
- * accelerator, which is the one actually used by `json.loads`).
- *
- * The context-variable check at the end is a RealSpec addition with no
- * counterpart in validate.py; it is inert unless the registry declares
- * `context_variables` or `produces`, which is what keeps parity intact.
+ * What stays here is message formatting. JSON docstrings are parsed by a
+ * faithful re-implementation of CPython's JSON scanner (`Lib/json/decoder.py`
+ * plus the `_json` C accelerator that `json.loads` actually uses), so a
+ * malformed docstring is reported with CPython-shaped text
+ * (`Expecting ',' delimiter: line 3 column 9 (char 25)`), and key sets are
+ * rendered the way Python's `repr()` renders them. Both are wording, not rules.
  */
 
 import { parseSteps, pyStrip, type Step } from './parse.js';
-import { matchesStepText, type StepDef, type StepRefSpec } from './registry.js';
+import type { OpenApiIndex } from './openapi.js';
+import {
+  applySubstitution,
+  DEFAULT_MUST_MATCH_MESSAGE,
+  matchesStepText,
+  usesOpenApi,
+  type DocstringSpec,
+  type OpenApiBinding,
+  type Registry,
+  type StepDef,
+  type StepRefSpec,
+} from './registry.js';
 
-// ── Docstring substitution patterns (mirrors validate.py) ────────────────────
-// These tokens are replaced with neutral values before JSON/SQL parsing so the
-// validator does not reject intentionally non-literal placeholders.
-
-/** `"{wagerId}"` → context variable inside a JSON string value. */
-const CTX_JSON_RE = /"\{[a-z][a-zA-Z0-9]+\}"/g;
-/** `"<non-null>"` → special assertion marker inside a JSON string value. */
-const NON_NULL_RE = /"<non-null>"/g;
-/** `"<paramName>"` → Scenario Outline parameter inside a JSON string value. */
-const OUTLINE_JSON_RE = /"<[a-zA-Z][a-zA-Z0-9]*>"/g;
-/** `'{wagerId}'` → context variable inside a SQL single-quoted literal. */
-const CTX_SQL_RE = /'\{[a-z][a-zA-Z0-9]+\}'/g;
-/** `<paramName>` in step text (Scenario Outline). */
+/**
+ * `<paramName>` in step text (Scenario Outline). Core grammar, not a rule: it is
+ * how an outline step is made matchable before any pattern is tried.
+ */
 const OUTLINE_STEP_RE = /<[a-zA-Z][a-zA-Z0-9]*>/g;
-/** `{varName}` anywhere in a step's text or docstring. */
+/** What every outline parameter is replaced by before pattern matching. */
+const OUTLINE_TOKEN = 'OUTLINE_PARAM';
+/** `{varName}` anywhere in a step's text or docstring — the context-variable grammar. */
 const CTX_NAME_RE = /\{([a-z][a-zA-Z0-9]+)\}/g;
-
-/** Step ids whose SQL docstring must be a SELECT query. */
-const QUERY_ASSERTION_IDS = new Set(['postgresql_query_returns', 'clickhouse_query_returns']);
 
 /** A single rule violation, ready for {@link formatViolation}. */
 export interface Violation {
@@ -493,48 +496,84 @@ export function pySorted(items: readonly string[]): string[] {
 // Content validators
 // ─────────────────────────────────────────────────────────────────────────────
 
-function substituteJson(content: string): string {
-  return content
-    .replace(CTX_JSON_RE, '"__ctx__"')
-    .replace(NON_NULL_RE, '"__non_null__"')
-    .replace(OUTLINE_JSON_RE, '"__outline__"');
-}
-
-/** Return an error string if `content` is not valid JSON after substitution. */
-export function checkJson(content: string): string | null {
-  const result = pyJsonLoads(substituteJson(content));
-  if (!result.ok) return `docstring is not valid JSON after substitution: ${result.error}`;
-  return null;
+/** Apply, in listed order, every substitution the registry declares for `type`. */
+export function substituteDocstring(content: string, type: string, registry: Registry): string {
+  let out = content;
+  for (const substitution of registry.substitutions) {
+    if (substitution.in === type) out = applySubstitution(substitution, out);
+  }
+  return out;
 }
 
 /**
- * For `http_request` steps the docstring must be a JSON object whose only
- * top-level keys are `headers` and `body`. Both are optional: the runner sends
- * no request body when `body` is absent, `{}` or `null`, so a GET that needs
- * neither may use an empty `{}` docstring.
+ * Return an error string if `content` is not valid JSON.
+ *
+ * `content` is what the parser will see, so a caller that owns substitutions
+ * applies them first (see {@link checkDocstring}).
  */
-export function checkHttpBody(content: string): string | null {
-  const err = checkJson(content);
-  if (err) return err;
-
-  const result = pyJsonLoads(substituteJson(content));
+export function checkJson(content: string): string | null {
+  const result = pyJsonLoads(content);
   if (!result.ok) return `docstring is not valid JSON after substitution: ${result.error}`;
-
-  const obj = result.value;
-  if (obj.t !== 'obj') return 'http_request docstring must be a JSON object';
-
-  const allowed = new Set(['headers', 'body']);
-  const seen = new Set<string>();
-  const extra: string[] = [];
-  for (const [key] of obj.v) {
-    if (seen.has(key)) continue;
-    seen.add(key);
-    if (!allowed.has(key)) extra.push(key);
-  }
-  if (extra.length > 0) {
-    return `http_request docstring has unexpected top-level keys: ${pyReprStrSet(extra)}`;
-  }
   return null;
+}
+
+/** Return an error string if the SQL content is empty. */
+export function checkSql(content: string): string | null {
+  return pyStrip(content) === '' ? 'SQL docstring must not be empty' : null;
+}
+
+/** The violation for a `must_match` that found nothing in `content`, or `null`. */
+function checkMustMatch(spec: DocstringSpec, content: string): string | null {
+  if (spec.mustMatch === null) return null;
+  // Compiled without g or y, so `.test` is stateless: this is "find", not "match".
+  if (spec.mustMatch.test(content)) return null;
+  return spec.mustMatchMessage ?? DEFAULT_MUST_MATCH_MESSAGE;
+}
+
+/**
+ * Check the docstring `content` of a step matched to `def`, using only what
+ * the step's docstring spec and the registry declare.
+ *
+ * JSON: parse the substituted content, then `must_match`, then
+ * `allowed_top_level_keys`, then `step_ref`. SQL: the raw content must not be
+ * empty, then the substituted content must satisfy `must_match`.
+ *
+ * @returns the violation message, or `null` when the content is acceptable
+ */
+export function checkDocstring(def: StepDef, content: string, registry: Registry): string | null {
+  const spec = def.docstring;
+  if (spec === null || spec.type === undefined) return null;
+  const substituted = substituteDocstring(content, spec.type, registry);
+
+  if (spec.type === 'json') {
+    const parsed = pyJsonLoads(substituted);
+    if (!parsed.ok) return `docstring is not valid JSON after substitution: ${parsed.error}`;
+
+    const mismatch = checkMustMatch(spec, substituted);
+    if (mismatch !== null) return mismatch;
+
+    if (spec.allowedTopLevelKeys !== null) {
+      const root = parsed.value;
+      if (root.t !== 'obj') return `${def.id} docstring must be a JSON object`;
+      const allowed = spec.allowedTopLevelKeys;
+      const seen = new Set<string>();
+      const extra: string[] = [];
+      for (const [key] of root.v) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (!allowed.includes(key)) extra.push(key);
+      }
+      if (extra.length > 0) {
+        return `${def.id} docstring has unexpected top-level keys: ${pyReprStrSet(extra)}`;
+      }
+    }
+
+    return def.stepRef === null ? null : checkStepRefs(substituted, def.stepRef, registry.steps);
+  }
+
+  const empty = checkSql(content);
+  if (empty !== null) return empty;
+  return checkMustMatch(spec, substituted);
 }
 
 /**
@@ -552,14 +591,17 @@ export function checkHttpBody(content: string): string | null {
  * The named step has to resolve, which is what keeps a registry that uses this
  * extension closed: the set of things nameable here is exactly the set of steps
  * it declares.
+ *
+ * `content` is the docstring AFTER the registry's substitutions, the text that
+ * was parsed, so a placeholder a substitution rewrote cannot hide a name.
  */
 export function checkStepRefs(
   content: string,
   spec: StepRefSpec,
   steps: readonly StepDef[],
 ): string | null {
-  const result = pyJsonLoads(substituteJson(content));
-  if (!result.ok) return null; // checkJson already reported it
+  const result = pyJsonLoads(content);
+  if (!result.ok) return null; // the parse failure is reported by the caller
 
   const root = result.value;
   if (root.t !== 'arr') return null; // nothing to name
@@ -594,70 +636,118 @@ export function checkStepRefs(
   return null;
 }
 
-// Python's `\s` and `\b` are Unicode-aware for `str` patterns while
-// JavaScript's are not, so both are spelled out here.
-const PY_SPACE_CLASS =
-  '\\t\\n\\v\\f\\r\\u001c-\\u001f \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000';
-const SQL_SELECT_RE = new RegExp(`^[${PY_SPACE_CLASS}]*SELECT`, 'i');
-const WORD_CHAR_RE = /[\p{L}\p{N}_]/u;
-
-/** Return an error string if the SQL content violates format rules. */
-export function checkSql(content: string, stepId: string): string | null {
-  if (pyStrip(content) === '') return 'SQL docstring must not be empty';
-  const cleaned = content.replace(CTX_SQL_RE, "'__ctx__'");
-  // Assertion steps must be SELECT queries
-  if (QUERY_ASSERTION_IDS.has(stepId)) {
-    const m = SQL_SELECT_RE.exec(cleaned);
-    let matched = m !== null;
-    if (m !== null) {
-      const after = cleaned.slice(m[0].length);
-      if (after !== '') {
-        const first = String.fromCodePoint(after.codePointAt(0) ?? 0);
-        if (WORD_CHAR_RE.test(first)) matched = false; // \b requires a boundary
-      }
-    }
-    if (!matched) {
-      return 'SQL in a query-assertion step must begin with SELECT';
-    }
-  }
-  return null;
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Core validator
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Validate one `.feature` source against the compiled step registry.
+ * Step text with Scenario Outline parameters (`<name>`) replaced by
+ * {@link OUTLINE_TOKEN}, so they do not block pattern matching, remembering
+ * what each token stood for so a captured group can be turned back into the
+ * text the author wrote.
+ */
+class StepText {
+  /** The text to match step patterns against. */
+  readonly normalised: string;
+  private readonly spans: ReadonlyArray<{ start: number; end: number; original: string }>;
+
+  constructor(text: string) {
+    const spans: Array<{ start: number; end: number; original: string }> = [];
+    let out = '';
+    let last = 0;
+    for (const m of text.matchAll(OUTLINE_STEP_RE)) {
+      out += text.slice(last, m.index);
+      const start = out.length;
+      out += OUTLINE_TOKEN;
+      spans.push({ start, end: out.length, original: m[0] });
+      last = m.index + m[0].length;
+    }
+    out += text.slice(last);
+    this.normalised = out;
+    this.spans = spans;
+  }
+
+  /**
+   * The substring `[start, end)` of {@link normalised} with every outline token
+   * it contains restored to the parameter it replaced. A span the range only
+   * partly covers is restored whole, exactly as the author wrote it.
+   */
+  original(start: number, end: number): string {
+    let out = '';
+    let pos = start;
+    for (const span of this.spans) {
+      if (span.end <= start) continue;
+      if (span.start >= end) break;
+      if (span.start > pos) out += this.normalised.slice(pos, span.start);
+      out += span.original;
+      pos = span.end;
+    }
+    if (pos < end) out += this.normalised.slice(pos, end);
+    return out;
+  }
+}
+
+/**
+ * Step 6: the request a step makes must exist in the API contract. Returns the
+ * index's message, or `null` when the request is defined (or cannot be read).
+ */
+function openApiMessage(
+  def: StepDef,
+  binding: OpenApiBinding,
+  text: StepText,
+  openapi: OpenApiIndex,
+): string | null {
+  // The step's own regex is sticky and reports no offsets; the same source with
+  // `d` says where each group sits, which is what restoring `<param>` needs.
+  const m = new RegExp(def.regex.source, 'yd').exec(text.normalised);
+  if (m === null) return null;
+  const capture = (group: number): string => {
+    const span = m.indices?.[group];
+    return span === undefined ? '' : text.original(span[0], span[1]);
+  };
+  return openapi.check(capture(binding.methodGroup).toUpperCase(), capture(binding.pathGroup));
+}
+
+/**
+ * Validate one `.feature` source against a loaded registry.
  *
- * @param providedVars `context_variables.provided`, or `null` when the registry
- *                     declares none — see {@link checkContextVariables}.
+ * @param openapi the API contract index; may be `null` only for a registry
+ *                that binds no step to it (see {@link usesOpenApi})
+ * @throws Error  when the registry has openapi-bound steps and no index was given
  */
 export function validate(
   filePath: string,
   source: string,
-  compiledSteps: readonly StepDef[],
-  providedVars: ReadonlySet<string> | null = null,
+  registry: Registry,
+  openapi: OpenApiIndex | null = null,
 ): Violation[] {
+  if (openapi === null && usesOpenApi(registry)) {
+    throw new Error(
+      `the registry has openapi-bound steps, so an OpenApiIndex is required to validate ${filePath}`,
+    );
+  }
+
+  const compiledSteps = registry.steps;
   const violations: Violation[] = [];
   const steps = parseSteps(source);
   /** The StepDef each step matched, aligned with `steps`; `null` when none. */
   const matched: Array<StepDef | null> = steps.map(() => null);
 
   for (const [i, step] of steps.entries()) {
+    const at = (message: string): Violation => ({
+      file: filePath,
+      line: step.line,
+      step: step.text,
+      message,
+    });
     // Normalise Scenario Outline tokens so they don't block pattern matching
-    const normalised = step.text.replace(OUTLINE_STEP_RE, 'OUTLINE_PARAM');
+    const text = new StepText(step.text);
 
     // ── 1. Find steps whose pattern matches ──────────────────────────────
-    const candidates = compiledSteps.filter((cs) => matchesStepText(cs, normalised));
+    const candidates = compiledSteps.filter((cs) => matchesStepText(cs, text.normalised));
 
     if (candidates.length === 0) {
-      violations.push({
-        file: filePath,
-        line: step.line,
-        step: step.text,
-        message: 'no matching step definition found in format.yml',
-      });
+      violations.push(at('no matching step definition found in format.yml'));
       continue;
     }
 
@@ -666,12 +756,9 @@ export function validate(
 
     if (match === undefined) {
       const allowed = pySorted([...new Set(candidates.flatMap((cs) => [...cs.keywords]))]);
-      violations.push({
-        file: filePath,
-        line: step.line,
-        step: step.text,
-        message: `keyword '${step.keyword}' is not allowed here (allowed: ${pyReprStrList(allowed)})`,
-      });
+      violations.push(
+        at(`keyword '${step.keyword}' is not allowed here (allowed: ${pyReprStrList(allowed)})`),
+      );
       continue;
     }
 
@@ -681,57 +768,42 @@ export function validate(
     const expectsDs = match.docstring; // null → no docstring allowed
 
     if (expectsDs === null && step.dsContent !== null) {
-      violations.push({
-        file: filePath,
-        line: step.line,
-        step: step.text,
-        message: `step '${match.id}' must not have a docstring`,
-      });
+      violations.push(at(`step '${match.id}' must not have a docstring`));
       continue;
     }
 
     if (expectsDs !== null && step.dsContent === null) {
-      violations.push({
-        file: filePath,
-        line: step.line,
-        step: step.text,
-        message: `step '${match.id}' requires a ${(expectsDs.type ?? '').toUpperCase()} docstring`,
-      });
+      violations.push(
+        at(`step '${match.id}' requires a ${(expectsDs.type ?? '').toUpperCase()} docstring`),
+      );
       continue;
     }
 
-    if (step.dsContent === null) continue; // no docstring — nothing more to check
+    if (step.dsContent !== null && expectsDs !== null) {
+      const expectedType = expectsDs.type;
 
-    // ── 4. Docstring marker ──────────────────────────────────────────────
-    const expectedType = expectsDs === null ? undefined : expectsDs.type;
-
-    if (expectedType !== undefined && expectedType !== '' && step.dsMarker !== expectedType) {
-      violations.push({
-        file: filePath,
-        line: step.line,
-        step: step.text,
-        message: `docstring marker is '${step.dsMarker}' but must be '${expectedType}'`,
-      });
-      continue; // skip content check — wrong parser would give misleading errors
-    }
-
-    // ── 5. Docstring content ─────────────────────────────────────────────
-    let err: string | null = null;
-    if (expectedType === 'json') {
-      err = match.id === 'http_request' ? checkHttpBody(step.dsContent) : checkJson(step.dsContent);
-      if (err === null && match.stepRef !== null) {
-        err = checkStepRefs(step.dsContent, match.stepRef, compiledSteps);
+      if (expectedType !== undefined && step.dsMarker !== expectedType) {
+        // ── 4. Docstring marker ──────────────────────────────────────────
+        // A wrong marker skips the content check: the wrong parser would only
+        // give misleading errors.
+        violations.push(at(`docstring marker is '${step.dsMarker}' but must be '${expectedType}'`));
+      } else {
+        // ── 5. Docstring content ─────────────────────────────────────────
+        const err = checkDocstring(match, step.dsContent, registry);
+        if (err !== null) violations.push(at(err));
       }
-    } else if (expectedType === 'sql') {
-      err = checkSql(step.dsContent, match.id);
     }
 
-    if (err !== null) {
-      violations.push({ file: filePath, line: step.line, step: step.text, message: err });
+    // ── 6. The request must exist in the API contract ────────────────────
+    // Reached whatever became of the docstring: a bad body does not excuse a
+    // request to an endpoint that does not exist.
+    if (match.openapi !== null && openapi !== null) {
+      const err = openApiMessage(match, match.openapi, text, openapi);
+      if (err !== null) violations.push(at(err));
     }
   }
 
-  const ctx = checkContextVariables(filePath, steps, matched, compiledSteps, providedVars);
+  const ctx = checkContextVariables(filePath, steps, matched, compiledSteps, registry.providedVars);
   return ctx.length === 0 ? violations : mergeByLine(violations, ctx);
 }
 
@@ -755,7 +827,7 @@ function referencedNames(step: Step): string[] {
 function producedName(def: StepDef | null, step: Step): string | null {
   if (def === null || def.producesGroup === null) return null;
   def.regex.lastIndex = 0;
-  const m = def.regex.exec(step.text.replace(OUTLINE_STEP_RE, 'OUTLINE_PARAM'));
+  const m = def.regex.exec(step.text.replace(OUTLINE_STEP_RE, OUTLINE_TOKEN));
   return m?.[def.producesGroup] ?? null;
 }
 
@@ -765,7 +837,7 @@ function producedName(def: StepDef | null, step: Step): string | null {
  * scenario (Background steps count as earlier).
  *
  * Inert unless the registry declares `context_variables` or at least one
- * `produces` — which is what keeps this check out of the original project's parity corpus.
+ * `produces`, so a registry that uses neither never sees it.
  */
 function checkContextVariables(
   filePath: string,

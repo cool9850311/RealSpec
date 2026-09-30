@@ -222,8 +222,8 @@ mod tests {
     /// Every step must be registered for `Given`, `When` AND `Then`.
     ///
     /// `format.yml` says it in as many words: "Cucumber step definitions are
-    /// keyword-agnostic; the `keywords` field is documentation-only and enforces
-    /// readable convention, not runtime behaviour." cucumber-rs is not
+    /// keyword-agnostic, so the `keywords` field has no effect when the tests
+    /// run." cucumber-rs is not
     /// keyword-agnostic by itself — `#[when]` registers for `When` only — and
     /// `And`/`But` inherit the keyword of the step above them. So a step written
     /// `And the customer pays at the payment provider:` after a `Then` is looked
