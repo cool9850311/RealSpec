@@ -190,12 +190,91 @@ refuses to start on a machine that lacks it, wherever it runs.
 
 The validator is the only packaged artefact here, because it is the only part
 with no coupling to a project: it reads `format.yml` and `.feature` files and
-nothing else. It is also a behaviour-compatible port of the Python validator this
-standard grew out of — byte-identical output over that project's whole corpus,
-held there by a test that runs wherever the corpus is pointed at
-(`REALSPEC_PARITY_CORPUS`). Step implementations know
+nothing else — `format.yml`, the `.feature` files, and the `../openapi` contract
+that `format.yml` binds steps to. It is a single npm package. Step implementations know
 which containers to start and which images to build; they are not a library, they
 are an example you copy.
+
+### The validator has no rules, only mechanisms
+
+The validator contains no knowledge of any project: no step id, no path prefix,
+no special value. Everything it enforces comes from `format.yml`, and each field
+is enforced by exactly one mechanism:
+
+| `format.yml` field | Enforced by |
+|---|---|
+| `pattern` | The step text (keyword stripped) must match a step's fully anchored regular expression; no match is a violation. |
+| `keywords` | Among the steps whose pattern matches, the first in file order that lists the step's Gherkin keyword is the one applied; if none lists it, the keyword is a violation. |
+| `captures` / `produces` | `captures` names the regex groups in order; `produces` names the capture that saves a context variable for the rest of the scenario. |
+| `context_variables` | Every `{name}` in step text or docstring must be listed under `provided` or saved earlier in the same scenario by a step that `produces` it. |
+| `docstring.type` | The docstring must exist or be absent as declared, its marker (`sql` or `json`) must equal the type, an SQL docstring must not be empty and a JSON docstring must parse. Any other type is rejected when the registry loads. |
+| `substitutions` | Applied in listed order to the content of docstrings of the given type (`in`), replacing every match of `match` (a JavaScript regular expression) with the literal text `with`, before the content is parsed or matched. This is where `"{orderId}"`, `"<non-null>"`, `"<quantity>"` and `'{orderId}'` are made acceptable to the parsers. |
+| `docstring.must_match` | The substituted docstring content must contain a match of this JavaScript regular expression (`must_match_message` is the violation text). Patterns are compiled without flags, so the examples require `SELECT` in query assertions with a character-class pattern (`[Ss][Ee][Ll][Ee][Cc][Tt]`) rather than a case-insensitive flag. |
+| `docstring.allowed_top_level_keys` | For a JSON docstring that is an object, no top-level key outside this list. Absent means no restriction. |
+| `step_ref` | An element of a JSON docstring array whose only key is the `step_ref` key names another step of this registry. That step must resolve, carry one of the listed `keywords`, and take no docstring when `docstring: none` is declared. |
+| `openapi` | Binds the step's `method` and `path` captures to the OpenAPI contract, see below. |
+
+`special_values`, `content_pattern` and `schema` are documentation only: they
+describe the format for the reader and nothing reads them. Loading is strict, so
+a declared field that cannot take effect (an unknown docstring type, an invalid
+regular expression, an `openapi` binding naming a capture the step does not have)
+stops the run with a message instead of being silently ignored.
+
+**How a run proceeds.** Every registry is loaded before any file is checked,
+so a broken `format.yml` or openapi file stops the run without a half-written
+report. Each distinct `format.yml` is loaded once and shared by the files it
+governs.
+
+```mermaid
+flowchart TD
+  A["realspec validate a.feature b.feature ..."] --> B{"--format given?"}
+  B -- yes --> D
+  B -- no --> C["For each feature file, walk up from its directory<br/>to the nearest format.yml, stopping at spec/"]
+  C -- none found --> X["ERROR on stderr, exit 1, no report"]
+  C --> D["Load format.yml strictly"]
+  D -- "unknown docstring type, invalid regex,<br/>openapi bound to a missing capture" --> X
+  D --> E{"Any step has an openapi binding?"}
+  E -- no --> G
+  E -- yes --> F["Read every yaml, yml and json file under ../openapi"]
+  F -- "missing directory, unparsable file, no paths" --> X
+  F --> G["Check every step of each feature file<br/>against the loaded registry"]
+  G --> H["Print a PASS or FAIL block per file;<br/>a missing file is a FAIL"]
+  H --> I{"Any violation or missing file?"}
+  I -- yes --> J["exit 1"]
+  I -- no --> K["exit 0"]
+```
+
+**The OpenAPI check.** A step that carries an `openapi:` binding has its HTTP
+method and path checked against the API contract.
+
+- The contract lives in `../openapi`, the directory next to the one holding
+  `format.yml` (`spec/openapi` for `spec/bdd/format.yml`). That location is the
+  only convention; nothing else configures it.
+- Every `yaml`, `yml` and `json` file under it is read on each run, so adding or
+  editing an openapi file needs no code change and no rebuild.
+- The path of the first `servers[].url` of each file is the base every path in
+  that file is joined to (`https://{host}/api/v1` gives `/api/v1`).
+- A step opts in by binding two of its captures:
+
+  ```yaml
+  - id: http_request
+    captures:
+      - name: method
+      - name: path
+    openapi:
+      method: method
+      path: path
+  ```
+
+  The minimart registries do this for `http_request`, `http_request_concurrent`
+  and `network_request_responded`; the paygate registry does it for
+  `http_request` and `network_request_responded`. A binding needs both a method
+  and a path capture, so paygate's `requests_concurrent`, whose method and path
+  live inside the docstring, has none.
+- `{contextVar}` and `<param>` segments in a feature path match any `{param}`
+  segment of the contract and never a literal one; a query string is ignored.
+- The validator checks that the method and path exist. It does not check
+  schemas, status codes or external `$ref` targets.
 
 ## Getting started
 

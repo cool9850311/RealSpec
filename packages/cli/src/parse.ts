@@ -1,10 +1,12 @@
 /**
  * parse.ts — Gherkin tokeniser.
  *
- * A line-for-line port of `parse_steps()` in the original
- * `validate.py`. Every quirk of the Python original is reproduced
- * deliberately, including CPython's `str.splitlines()` / `str.strip()`
- * semantics, so that the two implementations tokenise byte-identically.
+ * A deliberately small line-oriented tokeniser: it finds steps, their keyword,
+ * their text and an optional docstring, and nothing else. Line splitting and
+ * stripping follow CPython's `str.splitlines()` / `str.strip()` semantics
+ * (which characters count as a line break or as whitespace), because those
+ * definitions are part of what "a line" and "blank" mean to the spec's authors
+ * and have to stay fixed rather than drift with the JavaScript engine.
  */
 
 /** A single Gherkin step together with its optional docstring. */
@@ -25,7 +27,7 @@ export interface Step {
   readonly scenario: number;
 }
 
-// ── Gherkin tokeniser constants (mirrors validate.py) ────────────────────────
+// ── Gherkin tokeniser constants ─────────────────────────────────────
 
 const STEP_RE = /^(Given|When|Then|And|But)\s+(.+)$/;
 const SECTION_RE = /^(Feature:|Background:|Scenario Outline:|Scenario:|Examples:)/;

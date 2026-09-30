@@ -2,7 +2,22 @@
 #
 # Mirrors the shape of the original format.yml, trimmed to the
 # handful of steps the tests need. `content_pattern` is present on purpose:
-# validate.py never enforces it, and neither may this port.
+# the validator never enforces it, and that is intended.
+
+# Data-driven docstring rules. Nothing about these lives in the validator.
+substitutions:
+  - in: json
+    match: '"\{[a-z][a-zA-Z0-9]+\}"'
+    with: '"__ctx__"'
+  - in: json
+    match: '"<non-null>"'
+    with: '"__non_null__"'
+  - in: json
+    match: '"<[a-zA-Z][a-zA-Z0-9]*>"'
+    with: '"__outline__"'
+  - in: sql
+    match: "'\\{[a-z][a-zA-Z0-9]+\\}'"
+    with: "'__ctx__'"
 
 steps:
 
@@ -26,6 +41,8 @@ steps:
     docstring:
       type: sql
       content_pattern: "^(?!\\s*$)\\s*SELECT\\s[\\s\\S]+$"
+      must_match: '^\s*[Ss][Ee][Ll][Ee][Cc][Tt]\b'
+      must_match_message: SQL in a query-assertion step must begin with SELECT
     description: Asserts a SELECT row count.
 
   - id: http_request
@@ -33,6 +50,7 @@ steps:
     pattern: "^(GET|POST|PUT|PATCH|DELETE) (/api/v1/[a-zA-Z0-9/{}:._?=&%-]+):$"
     docstring:
       type: json
+      allowed_top_level_keys: [headers, body]
       schema:
         headers:
           required: false

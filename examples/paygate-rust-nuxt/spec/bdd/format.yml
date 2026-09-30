@@ -19,8 +19,10 @@
 #
 # All step patterns are fully anchored (^ … $) and match the full step text
 # after the Gherkin keyword (Given / When / Then / And / But) is stripped.
-# Cucumber step definitions are keyword-agnostic; the `keywords` field is
-# documentation-only and enforces readable convention, not runtime behaviour.
+# Cucumber step definitions are keyword-agnostic, so the `keywords` field has no
+# effect when the tests run. The validator does enforce it: a step written under
+# a keyword that is not listed here is reported, which keeps the vocabulary
+# reading the same way in every feature.
 # Capture groups are listed in order of appearance in the pattern.
 #
 # The e2e half of this file — the locator grammar and every browser step — is
@@ -240,8 +242,12 @@ steps:
           Absolute API path starting with /api/v1/, query string allowed. Every
           path must exist in spec/openapi/openapi.yaml. {camelCase} segments are
           substituted from the scenario's context variables.
+    openapi:
+      method: method
+      path: path
     docstring:
       type: json
+      allowed_top_level_keys: [headers, body]
       schema:
         headers:
           required: false
@@ -427,6 +433,8 @@ steps:
     docstring:
       type: json
       content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+      # Documentation only: how the validator treats these tokens is declared
+      # in the top-level `substitutions` list.
       special_values:
         - token: "\"<non-null>\""
           description: The field is present and not JSON null.
@@ -517,6 +525,8 @@ steps:
           `HAVING count(*) = n` and a count of 1.
     docstring:
       type: sql
+      must_match: "^\\s*[Ss][Ee][Ll][Ee][Cc][Tt]\\b"
+      must_match_message: SQL in a query-assertion step must begin with SELECT
       content_pattern: "^(?!\\s*$)\\s*SELECT\\s[\\s\\S]+$"
     description: >
       Runs the SELECT against this scenario's PostgreSQL immediately, with no
@@ -565,6 +575,8 @@ steps:
           hides a duplicate.
     docstring:
       type: sql
+      must_match: "^\\s*[Ss][Ee][Ll][Ee][Cc][Tt]\\b"
+      must_match_message: SQL in a query-assertion step must begin with SELECT
       content_pattern: "^(?!\\s*$)\\s*SELECT\\s[\\s\\S]+$"
     description: >
       Runs the SELECT against this scenario's ClickHouse immediately and asserts
@@ -1010,6 +1022,8 @@ steps:
     docstring:
       type: json
       content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+      # Documentation only: how the validator treats these tokens is declared
+      # in the top-level `substitutions` list.
       special_values:
         - token: "\"<non-null>\""
           description: >
@@ -1074,6 +1088,9 @@ steps:
       - name: status
         pattern: "\\d{3}"
         description: Expected response status code.
+    openapi:
+      method: method
+      path: path
     docstring: ~
     description: >
       Asserts that, at some point during this scenario, the page issued a
@@ -1126,6 +1143,44 @@ steps:
       Fails if the element is missing or ambiguous, or if its text is empty —
       saving "" would make every later interpolation quietly wrong.
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUBSTITUTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Non-literal placeholders a docstring may legitimately contain, neutralised
+# before the docstring is parsed or matched so the validator does not reject
+# them. Each item names the docstring type it applies to (`in`), a JavaScript
+# regular expression (`match`, compiled without flags) and the LITERAL text that
+# replaces every match (`with`); items run in the order listed. The replacement
+# only has to be valid in that docstring language and unable to collide with
+# real content.
+#
+# This list is the single home of these facts: the `special_values` entries and
+# the `docstring_types` patterns further down describe the same tokens for the
+# reader, and are documentation only.
+
+substitutions:
+
+  # {contextVar} as a whole JSON string value, e.g. "{paymentId}".
+  - in: json
+    match: '"\{[a-z][a-zA-Z0-9]+\}"'
+    with: '"__ctx__"'
+
+  # The "assert present and not null" marker.
+  - in: json
+    match: '"<non-null>"'
+    with: '"__non_null__"'
+
+  # Scenario Outline <param> as a whole JSON string value, e.g. "<cardNumber>".
+  - in: json
+    match: '"<[a-zA-Z][a-zA-Z0-9]*>"'
+    with: '"__outline__"'
+
+  # {contextVar} inside a SQL single-quoted literal, e.g. '{paymentId}'.
+  - in: sql
+    match: "'\\{[a-z][a-zA-Z0-9]+\\}'"
+    with: "'__ctx__'"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DOCSTRING TYPES

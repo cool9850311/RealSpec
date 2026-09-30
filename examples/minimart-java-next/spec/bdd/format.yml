@@ -13,8 +13,10 @@
 # All step patterns are fully anchored (^ … $) and match the full step text
 # after the Gherkin keyword (Given / When / Then / And / But) is stripped.
 #
-# Cucumber step definitions are keyword-agnostic; the `keywords` field is
-# documentation-only and enforces readable convention, not runtime behaviour.
+# Cucumber step definitions are keyword-agnostic, so the `keywords` field has no
+# effect when the tests run. The validator does enforce it: a step written under
+# a keyword that is not listed here is reported, which keeps the vocabulary
+# reading the same way in every feature.
 #
 # Capture groups are listed in order of appearance in the pattern.
 #
@@ -217,8 +219,12 @@ steps:
           must exist in spec/openapi/openapi.yaml (whose server base is
           {host}/api/v1). Path parameters use {camelCase} notation and are
           substituted from the scenario's context variables.
+    openapi:
+      method: method
+      path: path
     docstring:
       type: json
+      allowed_top_level_keys: [headers, body]
       schema:
         headers:
           required: false
@@ -260,6 +266,9 @@ steps:
         description: >
           Absolute API path; the same for every caller, under http_request's
           rules unchanged.
+    openapi:
+      method: method
+      path: path
     docstring:
       type: json
       schema:
@@ -338,6 +347,8 @@ steps:
     docstring:
       type: json
       content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+      # Documentation only: how the validator treats these tokens is declared
+      # in the top-level `substitutions` list.
       special_values:
         - token: "\"<non-null>\""
           description: >
@@ -463,7 +474,11 @@ steps:
           1 asserts exactly one record. Values > 1 assert at least N rows.
     docstring:
       type: sql
+      must_match: "^\\s*[Ss][Ee][Ll][Ee][Cc][Tt]\\b"
+      must_match_message: SQL in a query-assertion step must begin with SELECT
       content_pattern: "^(?!\\s*$)\\s*SELECT\\s[\\s\\S]+$"
+      # Documentation only: how the validator treats these tokens is declared
+      # in the top-level `substitutions` list.
       special_values:
         - token: "'{[a-z][a-zA-Z0-9]+}'"
           description: >
@@ -661,6 +676,8 @@ steps:
     docstring:
       type: json
       content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+      # Documentation only: how the validator treats these tokens is declared
+      # in the top-level `substitutions` list.
       special_values:
         - token: "\"<non-null>\""
           description: >
@@ -720,6 +737,8 @@ steps:
     docstring:
       type: json
       content_pattern: "^(?!\\s*$)[\\s\\S]+$"
+      # Documentation only: how the validator treats these tokens is declared
+      # in the top-level `substitutions` list.
       special_values:
         - token: "\"<non-null>\""
           description: Element exists within the row and its normalised text is non-empty.
@@ -749,6 +768,9 @@ steps:
       - name: status
         pattern: "\\d{3}"
         description: Expected response status code.
+    openapi:
+      method: method
+      path: path
     docstring: ~
     description: >
       Asserts that, at some point during this scenario, the page issued a
@@ -800,6 +822,44 @@ steps:
       context bag.
       Fails if the element is missing or ambiguous, or if its text is empty —
       saving "" would make every later interpolation quietly wrong.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUBSTITUTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Non-literal placeholders a docstring may legitimately contain, neutralised
+# before the docstring is parsed or matched so the validator does not reject
+# them. Each item names the docstring type it applies to (`in`), a JavaScript
+# regular expression (`match`, compiled without flags) and the LITERAL text that
+# replaces every match (`with`); items run in the order listed. The replacement
+# only has to be valid in that docstring language and unable to collide with
+# real content.
+#
+# This list is the single home of these facts: the `special_values` entries and
+# the `docstring_types` patterns further down describe the same tokens for the
+# reader, and are documentation only.
+
+substitutions:
+
+  # {contextVar} as a whole JSON string value, e.g. "{orderId}".
+  - in: json
+    match: '"\{[a-z][a-zA-Z0-9]+\}"'
+    with: '"__ctx__"'
+
+  # The "assert present and not null" marker.
+  - in: json
+    match: '"<non-null>"'
+    with: '"__non_null__"'
+
+  # Scenario Outline <param> as a whole JSON string value, e.g. "<quantity>".
+  - in: json
+    match: '"<[a-zA-Z][a-zA-Z0-9]*>"'
+    with: '"__outline__"'
+
+  # {contextVar} inside a SQL single-quoted literal, e.g. '{orderId}'.
+  - in: sql
+    match: "'\\{[a-z][a-zA-Z0-9]+\\}'"
+    with: "'__ctx__'"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DOCSTRING TYPES

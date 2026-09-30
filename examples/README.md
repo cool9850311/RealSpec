@@ -18,6 +18,46 @@ Every example, without exception, has:
 What differs between examples is the implementation. The point of having more
 than one is to keep proving that the standard is independent of the stack.
 
+## Validating
+
+Stage 1 of every example's pipeline is the validator, the `@realspec/cli`
+package of this repository. Install and build it once, then point it at an
+example's features; `format.yml` is found by walking up from each file. These
+are the commands `.github/workflows/ci.yml` runs:
+
+```bash
+npm ci
+npm run build -w @realspec/cli
+node packages/cli/dist/cli.js validate \
+  examples/minimart-go-nuxt/spec/bdd/api/*.feature \
+  examples/minimart-go-nuxt/spec/bdd/e2e/*.feature
+```
+
+`minimart-java-next` takes the same two globs under its own directory.
+`paygate-rust-nuxt` also validates its `spec.md` and OpenAPI documents, and names
+the registry explicitly:
+
+```bash
+node packages/cli/dist/cli.js validate \
+  --format examples/paygate-rust-nuxt/spec/bdd/format.yml \
+  examples/paygate-rust-nuxt/spec/spec.md \
+  examples/paygate-rust-nuxt/spec/openapi/*.yaml \
+  examples/paygate-rust-nuxt/spec/bdd/api/*.feature \
+  examples/paygate-rust-nuxt/spec/bdd/e2e/*.feature
+```
+
+The harness fixtures live outside `spec/`, so they name the registry explicitly
+(the same for each example, with its own directory):
+
+```bash
+node packages/cli/dist/cli.js validate \
+  --format examples/minimart-go-nuxt/spec/bdd/format.yml \
+  examples/minimart-go-nuxt/frontend/tests/e2e/harness/features/*/*.feature
+```
+
+All three registries bind their HTTP steps to `spec/openapi`, so a feature that
+names a method and path the contract does not define fails validation.
+
 ## Matrix
 
 | Example | Backend | Frontend | Rendering | Infra | Domain |

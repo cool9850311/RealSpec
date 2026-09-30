@@ -16,6 +16,7 @@ steps:
     pattern: "^(GET|POST|PUT|PATCH|DELETE) (/api/v1/[a-zA-Z0-9/{}:._?=&%-]+):$"
     docstring:
       type: json
+      allowed_top_level_keys: [headers, body]
       schema:
         headers:
           required: false

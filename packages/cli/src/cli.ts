@@ -2,13 +2,15 @@
 /**
  * cli.ts — `realspec validate <file.feature> ...`
  *
- * Behaviour-compatible with the original `validate.py`: for the same
- * inputs the report on stdout and the exit code are byte-identical.
+ * The registry that governs a feature file is found by walking up from the
+ * file's directory to the nearest `format.yml` (stopping at a `spec/` boundary
+ * or the filesystem root); `--format <path>` overrides this.
  *
- * The one deliberate difference is how the registry is located. validate.py
- * hardcodes `Path(__file__).parent / 'format.yml'`; a CLI has no such anchor,
- * so it walks up from each feature file's directory instead (stopping at a
- * `spec/` boundary or the filesystem root). `--format <path>` overrides this.
+ * Everything that can stop a run is settled before the first report line is
+ * written: a format.yml that does not load, and — for a registry that binds
+ * steps to an API contract — the `../openapi` directory next to it, which is
+ * read once per format.yml alongside the registry. Either failure is one
+ * `ERROR:` line on stderr and exit 1, never a half-written report.
  */
 
 import * as fs from 'node:fs';
@@ -16,7 +18,8 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { validate } from './checks.js';
-import { loadRegistry, RegistryError, type Registry } from './registry.js';
+import { loadOpenApi, type OpenApiIndex } from './openapi.js';
+import { loadRegistry, RegistryError, usesOpenApi, type Registry } from './registry.js';
 import { formatFileReport, formatMissingFile, pyPathStr } from './report.js';
 
 const USAGE = 'Usage: realspec validate <file.feature> [<file.feature> ...]';
@@ -33,6 +36,16 @@ Exit codes:
   0  every file passes
   1  at least one violation, missing file, or usage error
 `;
+
+/** Stand-in for a file no registry was resolved for (unreachable once every file resolves). */
+const EMPTY_REGISTRY: Registry = { steps: [], providedVars: null, substitutions: [] };
+
+/** A loaded format.yml together with the API contract its steps are bound to. */
+interface Loaded {
+  readonly registry: Registry;
+  /** `null` when no step of the registry carries an `openapi` binding. */
+  readonly openapi: OpenApiIndex | null;
+}
 
 /** The outcome of one CLI invocation. */
 export interface RunResult {
@@ -124,10 +137,10 @@ export function run(argv: readonly string[], options: RunOptions = {}): RunResul
     return { stdout: '', stderr: `${USAGE}\n`, exitCode: 1 };
   }
 
-  // ── Resolve every registry up front, so a bad format.yml never produces a
-  //    half-written report (validate.py likewise exits before printing).
-  const registries = new Map<string, Registry>();
-  const perFile = new Map<string, Registry>();
+  // ── Resolve every registry (and its openapi directory) up front, so a bad
+  //    format.yml or contract never produces a half-written report.
+  const loadedByFormat = new Map<string, Loaded>();
+  const perFile = new Map<string, Loaded>();
 
   let override: string | null = null;
   if (parsed.formatOverride !== null) {
@@ -163,8 +176,8 @@ export function run(argv: readonly string[], options: RunOptions = {}): RunResul
       formatPath = found;
     }
 
-    let registry = registries.get(formatPath);
-    if (registry === undefined) {
+    let loaded = loadedByFormat.get(formatPath);
+    if (loaded === undefined) {
       let source: string;
       try {
         source = fs.readFileSync(formatPath, 'utf8');
@@ -173,16 +186,22 @@ export function run(argv: readonly string[], options: RunOptions = {}): RunResul
         return { stdout: '', stderr: `ERROR: cannot read ${formatPath}: ${detail}\n`, exitCode: 1 };
       }
       try {
-        registry = loadRegistry(source, formatPath);
+        const registry = loadRegistry(source, formatPath);
+        // The contract lives beside the registry: <spec>/bdd/format.yml and
+        // <spec>/openapi. It is read only when a step is bound to it.
+        const openapi = usesOpenApi(registry)
+          ? loadOpenApi(path.resolve(path.dirname(formatPath), '../openapi'))
+          : null;
+        loaded = { registry, openapi };
       } catch (err) {
         if (err instanceof RegistryError) {
           return { stdout: '', stderr: `ERROR: ${err.message}\n`, exitCode: 1 };
         }
         throw err;
       }
-      registries.set(formatPath, registry);
+      loadedByFormat.set(formatPath, loaded);
     }
-    perFile.set(abs, registry);
+    perFile.set(abs, loaded);
   }
 
   // ── Report ────────────────────────────────────────────────────────────────
@@ -210,13 +229,11 @@ export function run(argv: readonly string[], options: RunOptions = {}): RunResul
       continue;
     }
 
-    const registry = perFile.get(abs);
-    const violations = validate(
-      shown,
-      source,
-      registry?.steps ?? [],
-      registry?.providedVars ?? null,
-    );
+    const loaded = perFile.get(abs);
+    const violations =
+      loaded === undefined
+        ? validate(shown, source, EMPTY_REGISTRY)
+        : validate(shown, source, loaded.registry, loaded.openapi);
     if (violations.length > 0) anyFailure = true;
     stdout += formatFileReport(shown, violations);
   }

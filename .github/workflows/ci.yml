@@ -143,12 +143,7 @@ jobs:
       - run: npm ci
       - run: npm run build -w @realspec/cli
 
-      # The validator's own tests. One of them — the parity case — compares
-      # this validator byte for byte with the Python one it was ported from,
-      # over that project's corpus. The corpus is not in this repository, so
-      # the case skips here unless REALSPEC_PARITY_CORPUS names a checkout of
-      # it. This step passing is not a parity result.
-      - name: Validator tests (parity case skips, its corpus is not in this repository)
+      - name: Validator tests
         run: npm test
 
   # ─── minimart-go-nuxt ──────────────────────────────────────────────────────

@@ -1,8 +1,10 @@
 /**
  * report.ts — console report rendering.
  *
- * Reproduces, character for character, the output of `main()` and
- * `Violation.__str__()` in the original `validate.py`.
+ * The report layout is fixed: a ruled heading per file, one entry per
+ * violation, a trailing blank line. Paths are displayed the way CPython's
+ * `str(pathlib.Path(arg))` normalises them, so a report reads the same
+ * whichever way a path was typed.
  */
 
 import type { Violation } from './checks.js';
@@ -37,7 +39,7 @@ function pad4(n: number): string {
   return s.length >= 4 ? s : ' '.repeat(4 - s.length) + s;
 }
 
-/** Python's `Violation.__str__()`. */
+/** One violation as it appears in a file's report block. */
 export function formatViolation(v: Violation): string {
   return `  line ${pad4(v.line)}  ${v.message}\n           → ${v.step}`;
 }
