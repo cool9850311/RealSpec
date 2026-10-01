@@ -51,10 +51,12 @@ describe.each(EXAMPLES)('example %s', (example) => {
     expect(existsSync(path.join(REPO_ROOT, format))).toBe(true);
   });
 
-  it('validates every spec feature', () => {
+  it('validates every spec feature, and uses every registered step', () => {
+    // The spec's own features alone, not the harness fixtures: a step only a
+    // harness fixture uses is a step the specification never needed.
     const files = featuresUnder(specDir);
     expect(files.length).toBeGreaterThan(0);
-    expectAllPass(['validate', ...files], files.length);
+    expectAllPass(['validate', ...files], files.length + 1);
   });
 
   it('validates every e2e harness feature against the spec registry', () => {
@@ -63,6 +65,7 @@ describe.each(EXAMPLES)('example %s', (example) => {
     expect(existsSync(path.join(REPO_ROOT, harnessDir))).toBe(true);
     const files = featuresUnder(harnessDir);
     expect(files.length).toBeGreaterThan(0);
-    expectAllPass(['validate', ...files, '--format', format], files.length);
+    // The fixtures exercise only the part of the registry the harness tests.
+    expectAllPass(['validate', '--allow-unused-steps', ...files, '--format', format], files.length);
   });
 });

@@ -139,8 +139,8 @@ is not.
 
 **Every registered step must be used by a scenario.** A registered step is an
 implemented step, so an unused one is code that has never run wearing the badge
-of code that has. Three of those were deleted; a test now fails the build if
-another appears.
+of code that has. Three of those were deleted; `realspec validate` now fails
+the build if another appears.
 
 ## The CLI, and CI
 
@@ -149,7 +149,9 @@ npx realspec validate spec/bdd/**/*.feature
 ```
 
 `format.yml` is found by walking up from each feature file, so that command
-needs no configuration. Exit code is `0` when every file passes and `1` when
+needs no configuration. The files given are taken to be every feature their
+registry governs, so a registered step none of them uses is reported against
+`format.yml` too; pass `--allow-unused-steps` when validating only a subset. Exit code is `0` when every file passes and `1` when
 anything fails. The report is one block per file:
 
 ```

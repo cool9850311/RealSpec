@@ -1041,8 +1041,8 @@ seeds them, and the mock is told the same pair.
 | Unit | `cargo test --workspace` | pure logic and adapters |
 | API (BDD) | cucumber-rs | status, body, headers, PostgreSQL, ClickHouse, the provider's request log, the merchant's delivery log |
 | E2E (BDD) | playwright-bdd | shop → paygate → the provider's cashier → the issuer → back, and the rows the clicks produce |
-| Grammar | `realspec validate` | every step exists in `format.yml` |
-| Registry parity | a test on each surface | every step is implemented there, nothing else is, and every step is used |
+| Grammar | `realspec validate` | every step exists in `format.yml`, and every step in `format.yml` is used by a feature |
+| Registry parity | a test on each surface | every step is implemented there, and nothing else is |
 
 Unit tests, by crate:
 

@@ -197,11 +197,11 @@ test('console has no errors watches all three sources the registry names', async
 
 test('registry parity: every e2e/shared step in format.yml is implemented here, and nothing else is', () => {
   // Needs no Docker — `spec.md`, "Layers": the "Registry parity" row requires
-  // "every step is implemented there, nothing else is, and every step is
-  // used." `bddgen`'s `missingSteps: 'fail-on-gen'` covers one direction
-  // (every step a feature uses is implemented); this test and the one below
-  // cover the other two: nothing extra is implemented, and every implemented
-  // step is actually used.
+  // "every step is implemented there, and nothing else is." `bddgen`'s
+  // `missingSteps: 'fail-on-gen'` covers one direction (every step a feature
+  // uses is implemented); this test covers the other: nothing extra is
+  // implemented. That every registered step is used by some feature is
+  // `realspec validate`'s to check, not this harness's.
   const registry = parseYaml(
     fs.readFileSync(path.join(EXAMPLE_DIR, 'spec/bdd/format.yml'), 'utf8'),
   ) as { steps: Array<{ id: string; pattern: string }> }
@@ -266,67 +266,6 @@ test('registry parity: every e2e/shared step in format.yml is implemented here, 
     registrations.length,
     'tests/e2e/steps registers a different number of steps than format.yml declares for this surface',
   ).toBe(implemented)
-})
-
-test('registry parity: every e2e/shared step is used by a file in spec/bdd/e2e', () => {
-  // `spec.md`, "Layers": the "Registry parity" row's "every step is used" —
-  // scoped to the real spec, not this harness's own fixtures, so this is the
-  // direction that would catch a step this surface implements but paygate's
-  // own scenarios never actually exercise.
-  const registry = parseYaml(
-    fs.readFileSync(path.join(EXAMPLE_DIR, 'spec/bdd/format.yml'), 'utf8'),
-  ) as { steps: Array<{ id: string; pattern: string }> }
-
-  const apiOnlySurface = new Set([
-    'http_request', 'requests_concurrent', 'payment_form_submitted',
-    'provider_card_entered', 'response_status', 'response_set_status_count', 'response_body_contains',
-    'response_body_does_not_contain', 'response_header_contains', 'save_response_body_field',
-    'save_response_cookie', 'provider_delivers_callbacks', 'callbacks_acknowledged',
-    'provider_next_query_answer', 'reconciler_runs', 'service_state',
-  ])
-
-  const featureFiles = fs
-    .readdirSync(path.join(EXAMPLE_DIR, 'spec/bdd/e2e'))
-    .filter((name) => name.endsWith('.feature'))
-    .map((name) => path.join(EXAMPLE_DIR, 'spec/bdd/e2e', name))
-
-  const stepLine = /^(Given|When|Then|And|But)\s+(.+)$/
-  const section = /^(Feature:|Background:|Scenario Outline:|Scenario:|Examples:)/
-  const outlineParam = /<[a-zA-Z][a-zA-Z0-9]*>/g
-
-  const compiled = registry.steps
-    .filter((step) => !apiOnlySurface.has(step.id))
-    .map((step) => {
-      let pattern = step.pattern.split(/\s+/).join(' ')
-      if (!pattern.startsWith('^')) pattern = `^${pattern}`
-      if (!pattern.endsWith('$')) pattern = `${pattern}$`
-      return { id: step.id, re: new RegExp(pattern) }
-    })
-
-  const uses = new Map(compiled.map((step) => [step.id, 0]))
-  for (const file of featureFiles) {
-    let inExamples = false
-    for (const raw of fs.readFileSync(file, 'utf8').split('\n')) {
-      const line = raw.trim()
-      if (line === '' || line.startsWith('#')) continue
-      if (section.test(line)) {
-        inExamples = line.startsWith('Examples:')
-        continue
-      }
-      if (inExamples && line.startsWith('|')) continue
-      const match = stepLine.exec(line)
-      if (!match) continue
-      const text = match[2]!.replace(outlineParam, 'OUTLINE_PARAM')
-      const hit = compiled.find((step) => step.re.test(text))
-      if (hit) uses.set(hit.id, uses.get(hit.id)! + 1)
-    }
-  }
-
-  const unused = [...uses].filter(([, count]) => count === 0).map(([id]) => id)
-  expect(
-    unused,
-    `format.yml registers these steps for this surface, and no feature in spec/bdd/e2e uses them.`,
-  ).toEqual([])
 })
 
 /** The pattern as a JavaScript regex literal: only `/` needs escaping. */

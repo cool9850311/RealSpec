@@ -16,7 +16,7 @@
  * rendered the way Python's `repr()` renders them. Both are wording, not rules.
  */
 
-import { parseSteps, pyStrip, type Step } from './parse.js';
+import { parseSteps, pySplitlines, pyStrip, type Step } from './parse.js';
 import type { OpenApiIndex } from './openapi.js';
 import {
   applySubstitution,
@@ -721,6 +721,26 @@ export function validate(
   registry: Registry,
   openapi: OpenApiIndex | null = null,
 ): Violation[] {
+  return validateFile(filePath, source, registry, openapi).violations;
+}
+
+/** What {@link validateFile} learns about one feature file. */
+export interface FileResult {
+  readonly violations: Violation[];
+  /** Ids of the registry steps this file's steps matched (keyword included). */
+  readonly usedStepIds: ReadonlySet<string>;
+}
+
+/**
+ * {@link validate}, also reporting which registry steps the file uses — the
+ * input {@link checkUnusedSteps} needs once every file has been read.
+ */
+export function validateFile(
+  filePath: string,
+  source: string,
+  registry: Registry,
+  openapi: OpenApiIndex | null = null,
+): FileResult {
   if (openapi === null && usesOpenApi(registry)) {
     throw new Error(
       `the registry has openapi-bound steps, so an OpenApiIndex is required to validate ${filePath}`,
@@ -804,7 +824,56 @@ export function validate(
   }
 
   const ctx = checkContextVariables(filePath, steps, matched, compiledSteps, registry.providedVars);
-  return ctx.length === 0 ? violations : mergeByLine(violations, ctx);
+  const usedStepIds = new Set(matched.flatMap((def) => (def === null ? [] : [def.id])));
+  return {
+    violations: ctx.length === 0 ? violations : mergeByLine(violations, ctx),
+    usedStepIds,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unused registry steps
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One violation per registry step that no feature file used.
+ *
+ * A registered step is an implemented step, so an unused one is code that has
+ * never run wearing the badge of code that has. This is a property of a whole
+ * set of features, not of one file, so it is only meaningful when the caller
+ * passes every feature the registry governs — which is why the CLI applies it
+ * unless told `--allow-unused-steps`.
+ *
+ * @param formatPath   the registry as it should be displayed
+ * @param formatSource the registry's text, used only to point at each step's `id:` line
+ * @param used         the union of {@link FileResult.usedStepIds} over the files
+ * @param fileCount    how many feature files `used` was collected from
+ */
+export function checkUnusedSteps(
+  formatPath: string,
+  formatSource: string,
+  registry: Registry,
+  used: ReadonlySet<string>,
+  fileCount: number,
+): Violation[] {
+  const lines = pySplitlines(formatSource);
+  return registry.steps
+    .filter((def) => !used.has(def.id))
+    .map((def) => {
+      const idLine = lines.findIndex((line) => idLineOf(line) === def.id);
+      return {
+        file: formatPath,
+        line: idLine + 1,
+        step: def.pattern,
+        message: `step '${def.id}' is used by none of the ${fileCount} feature file(s) validated against it`,
+      };
+    });
+}
+
+/** The value of a `- id: x` / `id: x` line, or `null` for any other line. */
+function idLineOf(line: string): string | null {
+  const m = /^\s*(?:-\s+)?id:\s*(['"]?)([^'"\s#]+)\1\s*(?:#.*)?$/.exec(line);
+  return m === null ? null : (m[2] ?? null);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

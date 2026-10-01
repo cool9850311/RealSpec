@@ -11,13 +11,19 @@
  * steps to an API contract — the `../openapi` directory next to it, which is
  * read once per format.yml alongside the registry. Either failure is one
  * `ERROR:` line on stderr and exit 1, never a half-written report.
+ *
+ * By default the files given are taken to be every feature each registry
+ * governs, so a registry step none of them uses fails too: a registered step is
+ * an implemented step, and one no scenario runs is unverified code.
+ * `--allow-unused-steps` turns that off for an invocation over a subset — one
+ * file while editing, or fixtures that exercise only part of a registry.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { validate } from './checks.js';
+import { checkUnusedSteps, validateFile } from './checks.js';
 import { loadOpenApi, type OpenApiIndex } from './openapi.js';
 import { loadRegistry, RegistryError, usesOpenApi, type Registry } from './registry.js';
 import { formatFileReport, formatMissingFile, pyPathStr } from './report.js';
@@ -29,8 +35,10 @@ const HELP = `${USAGE}
 Validates Gherkin .feature files against a bdd/format.yml step registry.
 
 Options:
-  --format <path>   Use this format.yml instead of discovering one.
-  -h, --help        Show this message.
+  --format <path>          Use this format.yml instead of discovering one.
+  --allow-unused-steps     Do not fail registry steps none of the given files
+                           uses (for validating a subset of the features).
+  -h, --help               Show this message.
 
 Exit codes:
   0  every file passes
@@ -42,6 +50,10 @@ const EMPTY_REGISTRY: Registry = { steps: [], providedVars: null, substitutions:
 
 /** A loaded format.yml together with the API contract its steps are bound to. */
 interface Loaded {
+  /** The format.yml path as it is displayed in the report. */
+  readonly shown: string;
+  /** The format.yml text, kept to point an unused step at its `id:` line. */
+  readonly source: string;
   readonly registry: Registry;
   /** `null` when no step of the registry carries an `openapi` binding. */
   readonly openapi: OpenApiIndex | null;
@@ -80,12 +92,14 @@ export function findFormatFile(startDir: string): string | null {
 interface ParsedArgs {
   readonly files: string[];
   readonly formatOverride: string | null;
+  readonly allowUnusedSteps: boolean;
   readonly help: boolean;
 }
 
 function parseArgs(argv: readonly string[]): ParsedArgs | { readonly error: string } {
   const files: string[] = [];
   let formatOverride: string | null = null;
+  let allowUnusedSteps = false;
   let help = false;
   let sawSubcommand = false;
 
@@ -105,6 +119,10 @@ function parseArgs(argv: readonly string[]): ParsedArgs | { readonly error: stri
       formatOverride = value;
       continue;
     }
+    if (arg === '--allow-unused-steps') {
+      allowUnusedSteps = true;
+      continue;
+    }
     if (arg === '-h' || arg === '--help') {
       help = true;
       continue;
@@ -119,7 +137,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs | { readonly error: stri
     files.push(arg);
   }
 
-  return { files, formatOverride, help };
+  return { files, formatOverride, allowUnusedSteps, help };
 }
 
 /** Run the CLI over `argv` (the arguments after the program name). */
@@ -192,7 +210,7 @@ export function run(argv: readonly string[], options: RunOptions = {}): RunResul
         const openapi = usesOpenApi(registry)
           ? loadOpenApi(path.resolve(path.dirname(formatPath), '../openapi'))
           : null;
-        loaded = { registry, openapi };
+        loaded = { shown: pyPathStr(path.relative(cwd, formatPath)), source, registry, openapi };
       } catch (err) {
         if (err instanceof RegistryError) {
           return { stdout: '', stderr: `ERROR: ${err.message}\n`, exitCode: 1 };
@@ -208,6 +226,8 @@ export function run(argv: readonly string[], options: RunOptions = {}): RunResul
   let stdout = '';
   let stderr = '';
   let anyFailure = false;
+  /** Per registry: the step ids its files used, and how many files it governed. */
+  const usage = new Map<Loaded, { used: Set<string>; files: number }>();
 
   for (const arg of parsed.files) {
     const shown = pyPathStr(arg);
@@ -230,12 +250,34 @@ export function run(argv: readonly string[], options: RunOptions = {}): RunResul
     }
 
     const loaded = perFile.get(abs);
-    const violations =
+    const result =
       loaded === undefined
-        ? validate(shown, source, EMPTY_REGISTRY)
-        : validate(shown, source, loaded.registry, loaded.openapi);
-    if (violations.length > 0) anyFailure = true;
-    stdout += formatFileReport(shown, violations);
+        ? validateFile(shown, source, EMPTY_REGISTRY)
+        : validateFile(shown, source, loaded.registry, loaded.openapi);
+    if (result.violations.length > 0) anyFailure = true;
+    stdout += formatFileReport(shown, result.violations);
+
+    if (loaded !== undefined) {
+      const entry = usage.get(loaded) ?? { used: new Set<string>(), files: 0 };
+      for (const id of result.usedStepIds) entry.used.add(id);
+      entry.files += 1;
+      usage.set(loaded, entry);
+    }
+  }
+
+  // ── Unused registry steps: settled only once every file has been read.
+  if (!parsed.allowUnusedSteps) {
+    for (const [loaded, entry] of usage) {
+      const violations = checkUnusedSteps(
+        loaded.shown,
+        loaded.source,
+        loaded.registry,
+        entry.used,
+        entry.files,
+      );
+      if (violations.length > 0) anyFailure = true;
+      stdout += formatFileReport(loaded.shown, violations);
+    }
   }
 
   stdout += '\n';
