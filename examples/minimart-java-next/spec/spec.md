@@ -276,11 +276,12 @@ frontend/                                 Next.js App Router, static export
 | Unit | JUnit (`./mvnw test`, Surefire) | `backend/src/test/java/minimart/` | Pure logic: JWT encode/decode, bcrypt verification, stock arithmetic, role enforcement, request parsing, configuration |
 | API (BDD) | Cucumber-JVM (`./mvnw verify`, Failsafe) | `spec/bdd/api/*.feature` | HTTP status, response body, and the resulting database state |
 | E2E (BDD) | playwright-bdd | `spec/bdd/e2e/*.feature` | What the user sees, and the database rows their clicks produce |
-| Grammar | `realspec validate` | CI stage 1 | Every step in every feature exists in `format.yml`, with a legal keyword and the right docstring type |
+| Grammar | `realspec validate` | CI stage 1 | Every step in every feature exists in `format.yml`, with a legal keyword and the right docstring type, and every step in `format.yml` is used by a feature |
 
 Two rules govern `format.yml`, and they cut in opposite directions.
 
-**Every entry is used by at least one feature**, and the harness asserts it. A
+**Every entry is used by at least one feature**, and `realspec validate`
+asserts it in CI stage 1. A
 registered step is an implemented step, so an unused one is an implementation
 that has never executed carrying the same badge as the ones that have. This
 project was bitten by exactly that shape once: the `headers` key of

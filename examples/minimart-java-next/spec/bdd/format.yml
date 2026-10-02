@@ -104,8 +104,8 @@
 # Also absent, and for the same reason: no step is registered here that no
 # scenario in this project uses. A registered step is an implemented step, and
 # an implementation no scenario ever runs is unverified code wearing the badge
-# of a verified one. The harness asserts this — see the registry-parity test in
-# frontend/tests/e2e/harness/harness.spec.ts.
+# of a verified one. `realspec validate` asserts this in CI stage 1, over
+# spec/bdd's own features.
 #
 # Absent for a third reason: no step is registered here that the steps already
 # registered can assemble, and none that a more general step can replace. An

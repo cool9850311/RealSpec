@@ -19,9 +19,9 @@ pub static CONTEXT_VAR_RE: LazyLock<Regex> =
 
 /// `(id, pattern)` for every step this crate implements — the API-and-shared
 /// surface of `format.yml`, copied verbatim. `src/registry.rs`'s tests check
-/// that this is exactly the set of registry steps a `spec/bdd/api/*.feature`
-/// scenario actually uses, and that every pattern here matches the
-/// registry's own byte for byte.
+/// that every pattern here matches the registry's own byte for byte. That
+/// every registry step is used by some feature is `realspec validate`'s to
+/// check, not this crate's.
 pub const IMPLEMENTED_STEPS: &[(&str, &str)] = &[
     ("run_migration", r"^run migration$"),
     ("exec_postgresql", r"^in PostgreSQL:$"),

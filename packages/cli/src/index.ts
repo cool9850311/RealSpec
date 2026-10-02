@@ -28,12 +28,15 @@ export {
   checkJson,
   checkSql,
   checkStepRefs,
+  checkUnusedSteps,
   pyReprStr,
   pyReprStrList,
   pyReprStrSet,
   pySorted,
   substituteDocstring,
   validate,
+  validateFile,
+  type FileResult,
   type Violation,
 } from './checks.js';
 export { loadOpenApi, OpenApiIndex, openApiOperation, type OpenApiOperation } from './openapi.js';

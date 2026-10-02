@@ -114,53 +114,11 @@ pub fn parse_format_yml() -> Vec<StepDef> {
     steps
 }
 
-/// Every Gherkin step LINE (title only, docstrings and comments stripped) of
-/// every `.feature` file directly under `spec/bdd/api`.
-///
-/// A "step line" here is whatever remains of a line after stripping a leading
-/// `Given|When|Then|And|But` keyword and its following whitespace; that is
-/// enough to run one of this registry's fully-anchored patterns against it,
-/// because every pattern is anchored on the text that follows the keyword.
-pub fn api_feature_step_lines() -> Vec<String> {
-    let mut lines = Vec::new();
-    let dir = api_features_dir();
-    let entries = fs::read_dir(&dir).unwrap_or_else(|e| panic!("reading {dir:?}: {e}"));
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("feature") {
-            continue;
-        }
-        let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path:?}: {e}"));
-        let mut in_docstring = false;
-        for raw in text.lines() {
-            let trimmed = raw.trim_start();
-            if trimmed.starts_with("\"\"\"") {
-                in_docstring = !in_docstring;
-                continue;
-            }
-            if in_docstring {
-                continue;
-            }
-            if trimmed.starts_with('#') || trimmed.is_empty() {
-                continue;
-            }
-            for kw in ["Given ", "When ", "Then ", "And ", "But ", "* "] {
-                if let Some(rest) = trimmed.strip_prefix(kw) {
-                    lines.push(rest.to_string());
-                    break;
-                }
-            }
-        }
-    }
-    lines
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::steps::IMPLEMENTED_STEPS;
     use regex::Regex;
-    use std::collections::BTreeSet;
 
     /// Every step this crate implements is declared in `format.yml` with the
     /// byte-identical pattern.
@@ -175,46 +133,6 @@ mod tests {
             assert_eq!(
                 &def.pattern, pattern,
                 "step {id:?}: implemented pattern does not match format.yml verbatim"
-            );
-        }
-    }
-
-    /// No id is implemented twice, and the implemented set is exactly the set
-    /// of registry steps that a scenario under `spec/bdd/api` actually uses —
-    /// which is, by construction, "the API-and-shared surface": nothing more,
-    /// nothing less.
-    #[test]
-    fn implemented_steps_are_exactly_the_api_surface() {
-        let registry = parse_format_yml();
-        let step_lines = api_feature_step_lines();
-
-        let implemented: BTreeSet<&str> = IMPLEMENTED_STEPS.iter().map(|(id, _)| *id).collect();
-        assert_eq!(
-            implemented.len(),
-            IMPLEMENTED_STEPS.len(),
-            "IMPLEMENTED_STEPS lists an id more than once"
-        );
-
-        for def in &registry {
-            let re = Regex::new(&def.pattern)
-                .unwrap_or_else(|e| panic!("step {:?} has an invalid pattern: {e}", def.id));
-            let used_by_api = step_lines.iter().any(|line| re.is_match(line));
-            let is_implemented = implemented.contains(def.id.as_str());
-            assert_eq!(
-                used_by_api, is_implemented,
-                "step {:?}: used by an api/*.feature file = {used_by_api}, implemented here = {is_implemented}",
-                def.id
-            );
-        }
-
-        // And the converse for ids IMPLEMENTED_STEPS names that format.yml
-        // does not: a typo here should fail loudly rather than silently not
-        // matching anything above.
-        let registry_ids: BTreeSet<&str> = registry.iter().map(|s| s.id.as_str()).collect();
-        for id in &implemented {
-            assert!(
-                registry_ids.contains(id),
-                "IMPLEMENTED_STEPS names {id:?}, which format.yml does not declare"
             );
         }
     }

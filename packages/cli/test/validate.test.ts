@@ -1,6 +1,6 @@
 /**
- * The CLI test plan, cases 1–20, plus case 22 for the context-variable check and
- * case 23 for `step_ref`.
+ * The CLI test plan, cases 1–20, plus case 22 for the context-variable check,
+ * case 23 for `step_ref` and case 24 for unused registry steps.
  *
  * Each case is a directory under fixtures/ holding a format.yml and one or more
  * feature files. The expectations are the validator's own contract: the message
@@ -54,8 +54,19 @@ function docstringViolations(name: string, header: string, marker: string, body:
   return validate('f.feature', source, registryOf(name));
 }
 
-/** Run the CLI inside a fixture directory, letting it discover format.yml. */
+/**
+ * Run the CLI inside a fixture directory, letting it discover format.yml.
+ *
+ * A fixture's registry holds more steps than its features use, and every case
+ * but 24 is about something else, so unused steps are allowed here; case 24
+ * calls {@link run} itself.
+ */
 function cli(name: string, args: string[]): ReturnType<typeof run> {
+  return run([...args, '--allow-unused-steps'], { cwd: dir(name) });
+}
+
+/** Run the CLI in a fixture directory exactly as given — unused steps fail. */
+function strict(name: string, args: string[]): ReturnType<typeof run> {
   return run(args, { cwd: dir(name) });
 }
 
@@ -312,6 +323,52 @@ describe('19. several files at once', () => {
   });
 });
 
+describe('24. unused registry steps', () => {
+  const formatBlock = (body: string, count: number): string =>
+    `\n${BAR}\n  ${count === 0 ? 'PASS' : 'FAIL'}  format.yml  (${count} violation(s))\n${BAR}\n${body}`;
+
+  it('reports each registry step none of the given files uses, at its id line', () => {
+    const r = strict('case24-unused-steps', ['validate', 'a.feature', 'b.feature']);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toBe('');
+    expect(r.stdout).toBe(
+      `\n${BAR}\n  PASS  a.feature  (0 violation(s))\n${BAR}\n` +
+        `\n${BAR}\n  PASS  b.feature  (0 violation(s))\n${BAR}\n` +
+        formatBlock(
+          `  line   19  step 'reset_clock' is used by none of the 2 feature file(s) validated against it\n` +
+            `           → ^the clock is reset$\n`,
+          1,
+        ) +
+        `\n`,
+    );
+  });
+
+  it('pools the files: a step one file uses is used', () => {
+    const r = strict('case24-unused-steps', ['a.feature']);
+    expect(r.stdout).toContain("step 'response_status' is used by none of the 1 feature file(s)");
+    expect(r.stdout).not.toContain("'run_migration'");
+  });
+
+  it('does not count a step written under a keyword it does not allow', () => {
+    const r = strict('case24-unused-steps', ['a.feature', 'b.feature', 'wrong.feature']);
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("keyword 'Then' is not allowed here");
+    expect(r.stdout).toContain("step 'reset_clock' is used by none of the 3 feature file(s)");
+  });
+
+  it('prints a PASS block for the registry when every step is used', () => {
+    const r = strict('case24-unused-steps', ['a.feature', 'b.feature', 'c.feature']);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(formatBlock('', 0));
+  });
+
+  it('is turned off by --allow-unused-steps, for validating a subset', () => {
+    const r = strict('case24-unused-steps', ['--allow-unused-steps', 'a.feature']);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).not.toContain('format.yml');
+  });
+});
+
 describe('20. bad invocations and bad registries', () => {
   it('prints usage and exits 1 with no arguments', () => {
     const r = run([], { cwd: dir('case18-pass') });
@@ -327,7 +384,7 @@ describe('20. bad invocations and bad registries', () => {
   });
 
   it('rejects --format without a value', () => {
-    const r = cli('case18-pass', ['x.feature', '--format']);
+    const r = strict('case18-pass', ['x.feature', '--format']);
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain('--format requires a path argument');
   });

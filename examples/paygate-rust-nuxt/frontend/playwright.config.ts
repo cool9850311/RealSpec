@@ -6,9 +6,8 @@
 // `bddgen` is not a convenience. It is the stage that fails when a feature uses
 // a step nobody implemented (`missingSteps: 'fail-on-gen'`, playwright-bdd's
 // default), which is half of what `spec.md`, "Layers" calls "Registry parity"
-// in its Test plan table — the other half, that nothing EXTRA is implemented
-// and that every implemented step is actually used, is
-// tests/e2e/harness/harness.spec.ts's two "registry parity" tests, which need
+// in its Test plan table — the other half, that nothing EXTRA is implemented,
+// is tests/e2e/harness/harness.spec.ts's "registry parity" test, which needs
 // no Docker and must pass without it.
 //
 // ── The projects ─────────────────────────────────────────────────────────────

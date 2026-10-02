@@ -168,8 +168,9 @@ function write(rel: string, content: string): void {
   writeFileSync(abs, content);
 }
 
+/** Each case's registry has more steps than its one feature uses, hence the flag. */
 function validate(rel: string = FEATURE): ReturnType<typeof run> {
-  return run(['validate', rel], { cwd: root });
+  return run(['validate', '--allow-unused-steps', rel], { cwd: root });
 }
 
 const ORDERS = contract(V1, { '/orders': ['get', 'post'] });
@@ -449,7 +450,10 @@ describe('13. --format with a feature file outside spec/', () => {
     const b = build([req('When GET /api/v1/orders'), req('When GET /api/v1/decoy')]);
     write('features/x.feature', b.text);
 
-    const r = run(['validate', 'features/x.feature', '--format', 'spec/bdd/format.yml'], { cwd: root });
+    const r = run(
+      ['validate', '--allow-unused-steps', 'features/x.feature', '--format', 'spec/bdd/format.yml'],
+      { cwd: root },
+    );
     expect(r).toEqual({
       stdout: fail('features/x.feature', [
         {
