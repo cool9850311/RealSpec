@@ -7,7 +7,6 @@ dist
 test-results/
 playwright-report/
 .features-gen/
-.playwright-mcp/
 
 # Rust build output. `target/` anywhere, because an example's workspace and its
 # BDD harness are two workspaces and each grows its own — together 11 GB of
@@ -32,7 +31,3 @@ reports/
 # into the code and into spec.md itself, which is where a reader will look.
 examples/paygate-rust-nuxt/**/*.md
 !examples/paygate-rust-nuxt/spec/spec.md
-
-# Local presentation deck and the Slidev agent skill used to build it
-slides/
-.claude/skills/slidev/
